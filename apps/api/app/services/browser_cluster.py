@@ -62,7 +62,7 @@ class LocalPlaywrightBrowserCluster:
             raise KeyError("Login session runtime not found")
 
         adapter = get_login_adapter(runtime.platform_key)
-        cookies = runtime.context.cookies("https://x.com")
+        cookies = runtime.context.cookies(adapter.get_cookie_origin())
         return adapter.is_logged_in(cookies=cookies)
 
     def export_storage_state(self, *, login_session_id: uuid.UUID) -> dict:
@@ -87,4 +87,3 @@ class LocalPlaywrightBrowserCluster:
 
 
 browser_cluster = LocalPlaywrightBrowserCluster()
-
