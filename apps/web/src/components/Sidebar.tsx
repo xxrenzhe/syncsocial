@@ -5,7 +5,10 @@ import Link from "next/link";
 
 type NavItem = { href: string; label: string };
 
-const userNav: NavItem[] = [{ href: "/", label: "仪表盘" }];
+const userNav: NavItem[] = [
+  { href: "/", label: "仪表盘" },
+  { href: "/social-accounts", label: "账号管理" },
+];
 const adminNav: NavItem[] = [{ href: "/admin/users", label: "用户管理" }];
 
 function NavList({ items, activePath }: { items: NavItem[]; activePath: string }) {
@@ -78,4 +81,3 @@ export function Sidebar({
     </aside>
   );
 }
-

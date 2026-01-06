@@ -30,3 +30,28 @@ export type AdminCreateUserResponse = {
   initial_password?: string | null;
 };
 
+export type SocialAccountPublic = {
+  id: string;
+  workspace_id: string;
+  platform_key: string;
+  handle: string | null;
+  display_name: string | null;
+  status: string;
+  labels: Record<string, unknown>;
+  created_at: string;
+  updated_at: string;
+  last_health_check_at: string | null;
+};
+
+export type LoginSessionPublic = {
+  id: string;
+  workspace_id: string;
+  social_account_id: string;
+  platform_key: string;
+  status: string;
+  remote_url: string | null;
+  expires_at: string;
+  created_by: string | null;
+  created_at: string;
+  updated_at: string;
+};
