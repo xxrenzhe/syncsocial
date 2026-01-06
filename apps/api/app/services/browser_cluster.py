@@ -98,6 +98,7 @@ class LocalPlaywrightBrowserCluster:
         target_url: str | None = None,
         target_external_id: str | None = None,
         bandwidth_mode: str | None = None,
+        action_params: dict | None = None,
     ) -> dict:
         raise RuntimeError("Local browser cluster does not support action execution yet; use BROWSER_CLUSTER_MODE=remote")
 
@@ -168,6 +169,7 @@ class RemoteBrowserCluster:
         target_url: str | None = None,
         target_external_id: str | None = None,
         bandwidth_mode: str | None = None,
+        action_params: dict | None = None,
     ) -> dict:
         return self._request_json(
             "POST",
@@ -179,6 +181,7 @@ class RemoteBrowserCluster:
                 "target_url": target_url,
                 "target_external_id": target_external_id,
                 "bandwidth_mode": bandwidth_mode,
+                "action_params": action_params or {},
             },
         )
 

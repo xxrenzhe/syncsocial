@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import base64
+import random
+import re
 from dataclasses import dataclass
 from typing import Any, Literal
 
@@ -31,6 +33,7 @@ def execute_action(
     target_url: str | None,
     target_external_id: str | None,
     bandwidth_mode: BandwidthMode | None,
+    action_params: dict[str, Any] | None,
     headless: bool,
 ) -> ExecuteActionResult:
     platform = platform_key.strip().lower()
@@ -62,6 +65,8 @@ def execute_action(
                     return _x_like(page, target_url=target_url, tweet_id=target_external_id)
                 if action in {"x_repost", "x_retweet", "retweet", "repost"}:
                     return _x_repost(page, target_url=target_url, tweet_id=target_external_id)
+                if action in {"x_search_collect", "search_collect"}:
+                    return _x_search_collect(page, search_url=target_url, params=action_params or {})
                 return ExecuteActionResult(
                     status="failed",
                     error_code="UNSUPPORTED_ACTION",
@@ -154,12 +159,14 @@ def execute_actions_batch(
                 action_type = str(item.get("action_type") or "")
                 target_url = str(item.get("target_url")) if item.get("target_url") else None
                 target_external_id = str(item.get("target_external_id")) if item.get("target_external_id") else None
+                action_params = item.get("action_params") if isinstance(item.get("action_params"), dict) else {}
                 try:
                     res = _execute_action_on_page(
                         page,
                         action_type=action_type,
                         target_url=target_url,
                         target_external_id=target_external_id,
+                        action_params=action_params,
                     )
                 except PlaywrightTimeoutError:
                     res = ExecuteActionResult(
@@ -248,6 +255,7 @@ def _execute_action_on_page(
     action_type: str,
     target_url: str | None,
     target_external_id: str | None,
+    action_params: dict[str, Any],
 ) -> ExecuteActionResult:
     action = str(action_type).strip().lower()
     if action in {"health_check", "x_health_check"}:
@@ -256,6 +264,8 @@ def _execute_action_on_page(
         return _x_like(page, target_url=target_url, tweet_id=target_external_id)
     if action in {"x_repost", "x_retweet", "retweet", "repost"}:
         return _x_repost(page, target_url=target_url, tweet_id=target_external_id)
+    if action in {"x_search_collect", "search_collect"}:
+        return _x_search_collect(page, search_url=target_url, params=action_params)
     return ExecuteActionResult(
         status="failed",
         error_code="UNSUPPORTED_ACTION",
@@ -264,6 +274,134 @@ def _execute_action_on_page(
         screenshot_base64=_safe_screenshot(page),
         metadata={},
     )
+
+
+def _x_search_collect(page: Any, *, search_url: str | None, params: dict[str, Any]) -> ExecuteActionResult:
+    if search_url is None or not str(search_url).strip():
+        return ExecuteActionResult(
+            status="failed",
+            error_code="INVALID_TARGET",
+            message="target_url is required for x_search_collect",
+            current_url=None,
+            screenshot_base64=None,
+            metadata={},
+        )
+
+    max_candidates = _get_int(params, "max_candidates", default=20, min_value=1, max_value=200)
+    scroll_limit = _get_int(params, "scroll_limit", default=6, min_value=0, max_value=50)
+    verified_only_dom = bool(params.get("verified_only_dom") is True)
+
+    page.goto(str(search_url), wait_until="domcontentloaded")
+    if not _x_is_logged_in(page):
+        screenshot = _safe_screenshot(page)
+        return ExecuteActionResult(
+            status="failed",
+            error_code="AUTH_REQUIRED",
+            message="Not logged in",
+            current_url=str(page.url),
+            screenshot_base64=screenshot,
+            metadata={"logged_in": False},
+        )
+
+    try:
+        page.wait_for_selector("article", timeout=10_000)
+    except PlaywrightTimeoutError:
+        screenshot = _safe_screenshot(page)
+        return ExecuteActionResult(
+            status="skipped",
+            error_code=None,
+            message="No search results",
+            current_url=str(page.url),
+            screenshot_base64=screenshot,
+            metadata={"candidates": [], "collected": 0},
+        )
+
+    candidates_by_id: dict[str, dict[str, Any]] = {}
+
+    for _ in range(scroll_limit + 1):
+        articles = page.locator("article")
+        count = articles.count()
+        for idx in range(count):
+            if len(candidates_by_id) >= max_candidates:
+                break
+            article = articles.nth(idx)
+            href = article.locator("a[href*='/status/']").first.get_attribute("href")
+            if not href:
+                continue
+            tweet_id = _extract_tweet_id_from_href(href)
+            if not tweet_id or tweet_id in candidates_by_id:
+                continue
+
+            url = _normalize_x_url(href)
+            is_verified = False
+            try:
+                is_verified = article.locator("[data-testid='icon-verified']").count() > 0
+            except Exception:
+                is_verified = False
+
+            if verified_only_dom and not is_verified:
+                continue
+
+            candidates_by_id[tweet_id] = {
+                "tweet_id": tweet_id,
+                "url": url,
+                "is_verified": is_verified,
+            }
+
+        if len(candidates_by_id) >= max_candidates:
+            break
+
+        page.mouse.wheel(0, random.randint(900, 1400))
+        page.wait_for_timeout(random.randint(450, 900))
+
+    candidates = list(candidates_by_id.values())
+    if not candidates:
+        return ExecuteActionResult(
+            status="skipped",
+            error_code=None,
+            message="No candidates found",
+            current_url=str(page.url),
+            screenshot_base64=None,
+            metadata={"candidates": [], "collected": 0},
+        )
+
+    return ExecuteActionResult(
+        status="succeeded",
+        error_code=None,
+        message=None,
+        current_url=str(page.url),
+        screenshot_base64=None,
+        metadata={"candidates": candidates, "collected": len(candidates)},
+    )
+
+
+def _extract_tweet_id_from_href(href: str) -> str | None:
+    m = re.search(r"/status/(?P<tweet_id>\\d+)", href)
+    if not m:
+        return None
+    return m.group("tweet_id")
+
+
+def _normalize_x_url(href: str) -> str:
+    raw = href.strip()
+    if raw.startswith("http://") or raw.startswith("https://"):
+        return raw.split("?", 1)[0]
+    if raw.startswith("/"):
+        return f"https://x.com{raw}".split("?", 1)[0]
+    return f"https://x.com/{raw}".split("?", 1)[0]
+
+
+def _get_int(source: dict[str, Any], key: str, *, default: int, min_value: int, max_value: int) -> int:
+    value = source.get(key, default)
+    try:
+        parsed = int(value)
+    except Exception:
+        parsed = default
+    if parsed < min_value:
+        return min_value
+    if parsed > max_value:
+        return max_value
+    return parsed
 
 
 def _x_health_check(page: Any) -> ExecuteActionResult:

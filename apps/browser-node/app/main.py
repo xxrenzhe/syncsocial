@@ -34,6 +34,7 @@ class ExecuteActionRequest(BaseModel):
     target_url: str | None = Field(default=None, max_length=2000)
     target_external_id: str | None = Field(default=None, max_length=200)
     bandwidth_mode: str | None = Field(default=None, max_length=16)
+    action_params: dict = Field(default_factory=dict)
 
 
 class ExecuteActionResponse(BaseModel):
@@ -49,6 +50,7 @@ class ExecuteActionBatchItem(BaseModel):
     action_type: str = Field(min_length=1, max_length=64)
     target_url: str | None = Field(default=None, max_length=2000)
     target_external_id: str | None = Field(default=None, max_length=200)
+    action_params: dict = Field(default_factory=dict)
 
 
 class ExecuteActionsBatchRequest(BaseModel):
@@ -108,6 +110,7 @@ def execute_action_endpoint(payload: ExecuteActionRequest, _: None = Depends(req
         target_url=payload.target_url,
         target_external_id=payload.target_external_id,
         bandwidth_mode=payload.bandwidth_mode if payload.bandwidth_mode else None,
+        action_params=payload.action_params,
         headless=settings.headless,
     )
     return ExecuteActionResponse(
