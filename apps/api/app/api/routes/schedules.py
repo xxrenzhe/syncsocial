@@ -16,6 +16,7 @@ from app.models.strategy import Strategy
 from app.models.user import User
 from app.schemas.run import RunPublic
 from app.schemas.schedule import CreateScheduleRequest, SchedulePublic, UpdateScheduleRequest
+from app.tasks.run_tasks import execute_account_run
 
 router = APIRouter()
 
@@ -155,5 +156,12 @@ def run_now(
 
     db.commit()
     db.refresh(run)
-    return RunPublic.model_validate(run, from_attributes=True)
 
+    account_run_ids = db.scalars(select(AccountRun.id).where(AccountRun.run_id == run.id)).all()
+    for account_run_id in account_run_ids:
+        try:
+            execute_account_run.delay(str(account_run_id))
+        except Exception:
+            pass
+
+    return RunPublic.model_validate(run, from_attributes=True)
