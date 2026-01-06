@@ -104,6 +104,40 @@ export default function SocialAccountsPage() {
     }
   }
 
+  async function finalizeSession(account: SocialAccountPublic) {
+    const sessionId = sessions[account.id]?.session?.id;
+    if (!sessionId) return;
+    setSessions((prev) => ({ ...prev, [account.id]: { ...prev[account.id], loading: true, error: null } as SessionState }));
+    try {
+      const res = await auth.apiFetch(`/login-sessions/${sessionId}/finalize`, { method: "POST" });
+      if (!res.ok) throw new Error(await res.text());
+      const session = (await res.json()) as LoginSessionPublic;
+      setSessions((prev) => ({ ...prev, [account.id]: { session, loading: false, error: null } }));
+      await loadAccounts();
+    } catch (err) {
+      setSessions((prev) => ({
+        ...prev,
+        [account.id]: { ...prev[account.id], loading: false, error: String(err) } as SessionState,
+      }));
+    }
+  }
+
+  async function cancelSession(account: SocialAccountPublic) {
+    const sessionId = sessions[account.id]?.session?.id;
+    if (!sessionId) return;
+    setSessions((prev) => ({ ...prev, [account.id]: { ...prev[account.id], loading: true, error: null } as SessionState }));
+    try {
+      const res = await auth.apiFetch(`/login-sessions/${sessionId}/cancel`, { method: "POST" });
+      if (!res.ok) throw new Error(await res.text());
+      await refreshSession(account);
+    } catch (err) {
+      setSessions((prev) => ({
+        ...prev,
+        [account.id]: { ...prev[account.id], loading: false, error: String(err) } as SessionState,
+      }));
+    }
+  }
+
   return (
     <div style={{ padding: 24 }}>
       <h1 style={{ marginBottom: 16 }}>账号管理</h1>
@@ -165,11 +199,27 @@ export default function SocialAccountsPage() {
                 </button>
                 <button
                   type="button"
+                  onClick={() => finalizeSession(a)}
+                  disabled={!s?.session?.id || s?.loading}
+                  style={{ padding: "8px 12px", borderRadius: 10, border: "1px solid #333", background: "transparent" }}
+                >
+                  采集并保存凭证
+                </button>
+                <button
+                  type="button"
                   onClick={() => refreshSession(a)}
                   disabled={!s?.session?.id || s?.loading}
                   style={{ padding: "8px 12px", borderRadius: 10, border: "1px solid #333", background: "transparent" }}
                 >
                   刷新状态
+                </button>
+                <button
+                  type="button"
+                  onClick={() => cancelSession(a)}
+                  disabled={!s?.session?.id || s?.loading}
+                  style={{ padding: "8px 12px", borderRadius: 10, border: "1px solid #333", background: "transparent" }}
+                >
+                  取消会话
                 </button>
                 {s?.session?.remote_url ? (
                   <a
@@ -190,7 +240,7 @@ export default function SocialAccountsPage() {
                   <div>Expires：{new Date(s.session.expires_at).toLocaleString()}</div>
                   {!s.session.remote_url ? (
                     <div style={{ opacity: 0.7 }}>
-                      remote_url 暂为空（Browser Cluster 尚未接入；后续会返回 noVNC URL）。
+                      remote_url 暂为空（当前为本地交互模式：后端已尝试在服务器打开浏览器窗口；后续将接入 noVNC 并返回可访问链接）。
                     </div>
                   ) : null}
                 </div>
@@ -202,4 +252,3 @@ export default function SocialAccountsPage() {
     </div>
   );
 }
-
