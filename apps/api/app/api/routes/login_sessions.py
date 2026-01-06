@@ -103,6 +103,7 @@ def finalize_login_session(
     except RuntimeError as exc:
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(exc)) from exc
 
+    now = utc_now()
     credential = db.scalar(
         select(Credential).where(
             Credential.workspace_id == row.workspace_id,
@@ -117,15 +118,18 @@ def finalize_login_session(
             credential_type="storage_state",
             encrypted_blob=encrypted_blob,
             key_version=1,
+            validated_at=now,
         )
         db.add(credential)
     else:
         credential.encrypted_blob = encrypted_blob
+        credential.validated_at = now
         db.add(credential)
 
     account = db.get(SocialAccount, row.social_account_id)
     if account is not None:
         account.status = "healthy"
+        account.last_health_check_at = now
         db.add(account)
 
     row.status = "succeeded"

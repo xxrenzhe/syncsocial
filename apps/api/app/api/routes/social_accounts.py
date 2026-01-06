@@ -14,6 +14,7 @@ from app.models.user import User
 from app.schemas.login_session import LoginSessionPublic
 from app.schemas.social_account import CreateSocialAccountRequest, SocialAccountPublic
 from app.services.browser_cluster import browser_cluster
+from app.services.login_session_auto_capture import start_auto_capture
 from app.utils.time import utc_now
 
 router = APIRouter()
@@ -86,6 +87,7 @@ def create_login_session(
         db.add(row)
         db.commit()
         db.refresh(row)
+        start_auto_capture(row.id)
     except Exception:
         row.status = "failed"
         db.add(row)

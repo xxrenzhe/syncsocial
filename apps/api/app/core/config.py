@@ -38,6 +38,8 @@ class Settings(BaseSettings):
     browser_node_api_base_url: str | None = Field(default=None, alias="BROWSER_NODE_API_BASE_URL")
     browser_node_internal_token: str | None = Field(default=None, alias="BROWSER_NODE_INTERNAL_TOKEN")
 
+    login_session_auto_capture: bool = Field(default=True, alias="LOGIN_SESSION_AUTO_CAPTURE")
+
     def normalized_cors_origins(self) -> list[str]:
         value: Any = self.cors_origins
         if isinstance(value, str):
