@@ -16,7 +16,9 @@ from app.models.strategy import Strategy
 from app.models.user import User
 from app.schemas.run import RunPublic
 from app.schemas.schedule import CreateScheduleRequest, SchedulePublic, UpdateScheduleRequest
+from app.services.schedule_planner import compute_next_run_at
 from app.tasks.run_tasks import execute_account_run
+from app.utils.time import utc_now
 
 router = APIRouter()
 
@@ -67,6 +69,7 @@ def create_schedule(
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid strategy_id")
 
     selector = payload.account_selector or {"all": True}
+    now = utc_now()
     row = Schedule(
         workspace_id=user.workspace_id,
         name=payload.name,
@@ -77,6 +80,12 @@ def create_schedule(
         schedule_spec=payload.schedule_spec,
         random_config=payload.random_config,
         max_parallel=payload.max_parallel,
+        next_run_at=compute_next_run_at(
+            frequency=payload.frequency,
+            schedule_spec=payload.schedule_spec,
+            random_config=payload.random_config,
+            now=now,
+        ),
     )
     db.add(row)
     db.commit()
@@ -109,6 +118,14 @@ def update_schedule(
         row.random_config = payload.random_config
     if payload.max_parallel is not None:
         row.max_parallel = payload.max_parallel
+
+    if payload.frequency is not None or payload.schedule_spec is not None or payload.random_config is not None:
+        row.next_run_at = compute_next_run_at(
+            frequency=row.frequency,
+            schedule_spec=row.schedule_spec or {},
+            random_config=row.random_config or {},
+            now=utc_now(),
+        )
 
     db.add(row)
     db.commit()
@@ -163,5 +180,15 @@ def run_now(
             execute_account_run.delay(str(account_run_id))
         except Exception:
             pass
+
+    schedule.last_run_at = utc_now()
+    schedule.next_run_at = compute_next_run_at(
+        frequency=schedule.frequency,
+        schedule_spec=schedule.schedule_spec or {},
+        random_config=schedule.random_config or {},
+        now=utc_now(),
+    )
+    db.add(schedule)
+    db.commit()
 
     return RunPublic.model_validate(run, from_attributes=True)

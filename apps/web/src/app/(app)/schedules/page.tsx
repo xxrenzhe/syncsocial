@@ -15,6 +15,16 @@ export default function SchedulesPage() {
   const [name, setName] = useState("");
   const [strategyId, setStrategyId] = useState("");
   const [accountSelectorText, setAccountSelectorText] = useState('{"all": true}');
+  const [frequency, setFrequency] = useState<"manual" | "interval" | "daily">("manual");
+  const [scheduleSpecText, setScheduleSpecText] = useState("{}");
+  const [randomConfigText, setRandomConfigText] = useState("{}");
+  const [maxParallel, setMaxParallel] = useState(1);
+
+  useEffect(() => {
+    if (frequency === "interval") setScheduleSpecText('{"every_minutes": 60}');
+    else if (frequency === "daily") setScheduleSpecText('{"time_of_day": "09:00"}');
+    else setScheduleSpecText("{}");
+  }, [frequency]);
 
   async function load() {
     setLoading(true);
@@ -54,6 +64,20 @@ export default function SchedulesPage() {
       setError("account_selector 必须是合法 JSON");
       return;
     }
+    let scheduleSpec: Record<string, unknown> = {};
+    try {
+      scheduleSpec = JSON.parse(scheduleSpecText) as Record<string, unknown>;
+    } catch {
+      setError("schedule_spec 必须是合法 JSON");
+      return;
+    }
+    let randomConfig: Record<string, unknown> = {};
+    try {
+      randomConfig = JSON.parse(randomConfigText) as Record<string, unknown>;
+    } catch {
+      setError("random_config 必须是合法 JSON");
+      return;
+    }
     try {
       const res = await auth.apiFetch("/schedules", {
         method: "POST",
@@ -62,15 +86,16 @@ export default function SchedulesPage() {
           strategy_id: strategyId,
           enabled: true,
           account_selector: selector,
-          frequency: "manual",
-          schedule_spec: {},
-          random_config: {},
-          max_parallel: 1,
+          frequency,
+          schedule_spec: scheduleSpec,
+          random_config: randomConfig,
+          max_parallel: maxParallel,
         }),
       });
       if (!res.ok) throw new Error(await res.text());
       setName("");
       setAccountSelectorText('{"all": true}');
+      setRandomConfigText("{}");
       await load();
     } catch (err) {
       setError(err instanceof Error ? err.message : "创建失败");
@@ -119,6 +144,35 @@ export default function SchedulesPage() {
           placeholder='account_selector JSON，比如 {"all": true}'
           style={{ padding: 10, borderRadius: 8, border: "1px solid #333", minWidth: 360 }}
         />
+        <select
+          value={frequency}
+          onChange={(e) => setFrequency(e.target.value as "manual" | "interval" | "daily")}
+          style={{ padding: 10, borderRadius: 8, border: "1px solid #333" }}
+        >
+          <option value="manual">manual（仅手动触发）</option>
+          <option value="interval">interval（按间隔）</option>
+          <option value="daily">daily（每天定时）</option>
+        </select>
+        <input
+          value={scheduleSpecText}
+          onChange={(e) => setScheduleSpecText(e.target.value)}
+          placeholder='schedule_spec JSON，比如 {"every_minutes":60} / {"time_of_day":"09:00"}'
+          style={{ padding: 10, borderRadius: 8, border: "1px solid #333", minWidth: 360 }}
+        />
+        <input
+          value={randomConfigText}
+          onChange={(e) => setRandomConfigText(e.target.value)}
+          placeholder='random_config JSON，比如 {"offset_minutes_max":30,"skip_probability":0.2}'
+          style={{ padding: 10, borderRadius: 8, border: "1px solid #333", minWidth: 420 }}
+        />
+        <input
+          value={String(maxParallel)}
+          onChange={(e) => setMaxParallel(Number(e.target.value))}
+          type="number"
+          min={1}
+          max={100}
+          style={{ padding: 10, borderRadius: 8, border: "1px solid #333", width: 120 }}
+        />
         <button
           type="submit"
           style={{ padding: "10px 14px", borderRadius: 10, border: "none", background: "#2f6fed", color: "white" }}
@@ -140,6 +194,8 @@ export default function SchedulesPage() {
               <th style={{ padding: 10 }}>Name</th>
               <th style={{ padding: 10 }}>Enabled</th>
               <th style={{ padding: 10 }}>Strategy</th>
+              <th style={{ padding: 10 }}>Frequency</th>
+              <th style={{ padding: 10 }}>Next</th>
               <th style={{ padding: 10 }}>Actions</th>
             </tr>
           </thead>
@@ -149,6 +205,8 @@ export default function SchedulesPage() {
                 <td style={{ padding: 10 }}>{s.name}</td>
                 <td style={{ padding: 10 }}>{s.enabled ? "yes" : "no"}</td>
                 <td style={{ padding: 10 }}>{s.strategy_id}</td>
+                <td style={{ padding: 10 }}>{s.frequency}</td>
+                <td style={{ padding: 10 }}>{s.next_run_at ? new Date(s.next_run_at).toLocaleString() : "—"}</td>
                 <td style={{ padding: 10 }}>
                   <button
                     type="button"
@@ -166,4 +224,3 @@ export default function SchedulesPage() {
     </div>
   );
 }
-

@@ -38,6 +38,21 @@ services:
       - redis
       - browser-node
 
+  beat:
+    build:
+      context: ./apps/api
+    command: celery -A app.celery_app:celery_app beat -l info
+    environment:
+      DATABASE_URL: postgresql+psycopg://syncsocial:syncsocial@postgres:5432/syncsocial
+      JWT_SECRET_KEY: ${JWT_SECRET_KEY:-dev-secret}
+      REFRESH_TOKEN_PEPPER: ${REFRESH_TOKEN_PEPPER:-dev-pepper}
+      CREDENTIAL_ENCRYPTION_KEY: ${CREDENTIAL_ENCRYPTION_KEY:-}
+      REDIS_URL: redis://redis:6379/0
+      CELERY_TASK_ALWAYS_EAGER: "false"
+    depends_on:
+      - postgres
+      - redis
+
   web:
     build:
       context: ./apps/web
