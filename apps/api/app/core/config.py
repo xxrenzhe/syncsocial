@@ -36,6 +36,7 @@ class Settings(BaseSettings):
 
     browser_cluster_mode: str = Field(default="local", alias="BROWSER_CLUSTER_MODE")
     browser_node_api_base_url: str | None = Field(default=None, alias="BROWSER_NODE_API_BASE_URL")
+    browser_node_internal_token: str | None = Field(default=None, alias="BROWSER_NODE_INTERNAL_TOKEN")
 
     def normalized_cors_origins(self) -> list[str]:
         value: Any = self.cors_origins

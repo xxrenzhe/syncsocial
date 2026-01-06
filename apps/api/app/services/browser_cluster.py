@@ -90,13 +90,16 @@ class LocalPlaywrightBrowserCluster:
                 runtime.playwright.stop()
 
 class RemoteBrowserCluster:
-    def __init__(self, *, base_url: str) -> None:
+    def __init__(self, *, base_url: str, internal_token: str | None = None) -> None:
         self._base_url = base_url.rstrip("/")
+        self._internal_token = internal_token.strip() if internal_token and internal_token.strip() else None
 
     def _request_json(self, method: str, path: str, payload: dict | None = None) -> dict:
         url = f"{self._base_url}{path}"
         data = None
         headers = {"accept": "application/json"}
+        if self._internal_token:
+            headers["x-internal-token"] = self._internal_token
         if payload is not None:
             data = json.dumps(payload).encode("utf-8")
             headers["content-type"] = "application/json"
@@ -138,6 +141,6 @@ if settings.browser_cluster_mode.strip().lower() == "remote":
     base_url = settings.browser_node_api_base_url
     if base_url is None or not base_url.strip():
         raise RuntimeError("BROWSER_NODE_API_BASE_URL is required when BROWSER_CLUSTER_MODE=remote")
-    browser_cluster = RemoteBrowserCluster(base_url=base_url)
+    browser_cluster = RemoteBrowserCluster(base_url=base_url, internal_token=settings.browser_node_internal_token)
 else:
     browser_cluster = LocalPlaywrightBrowserCluster()
