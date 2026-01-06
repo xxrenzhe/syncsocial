@@ -32,6 +32,8 @@ class Settings(BaseSettings):
     seed_admin_email: str | None = Field(default=None, alias="SEED_ADMIN_EMAIL")
     seed_admin_password: str | None = Field(default=None, alias="SEED_ADMIN_PASSWORD")
 
+    credential_encryption_key: str | None = Field(default=None, alias="CREDENTIAL_ENCRYPTION_KEY")
+
     def normalized_cors_origins(self) -> list[str]:
         value: Any = self.cors_origins
         if isinstance(value, str):
