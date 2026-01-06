@@ -1,0 +1,25 @@
+.DS_Store
+
+# Never commit local-only materials
+docs/
+oldcode/
+secrets/
+
+# Env / secrets
+.env
+.env.*
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Node / Next.js
+node_modules/
+.next/
+dist/
+build/
+
