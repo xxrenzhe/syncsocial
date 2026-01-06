@@ -55,3 +55,77 @@ export type LoginSessionPublic = {
   created_at: string;
   updated_at: string;
 };
+
+export type StrategyPublic = {
+  id: string;
+  workspace_id: string;
+  name: string;
+  platform_key: string;
+  version: number;
+  config: Record<string, unknown>;
+  created_at: string;
+  updated_at: string;
+};
+
+export type SchedulePublic = {
+  id: string;
+  workspace_id: string;
+  name: string;
+  enabled: boolean;
+  strategy_id: string;
+  account_selector: Record<string, unknown>;
+  frequency: string;
+  schedule_spec: Record<string, unknown>;
+  random_config: Record<string, unknown>;
+  max_parallel: number;
+  next_run_at: string | null;
+  last_run_at: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export type RunPublic = {
+  id: string;
+  workspace_id: string;
+  schedule_id: string | null;
+  strategy_id: string;
+  triggered_by: string | null;
+  status: string;
+  created_at: string;
+  started_at: string | null;
+  finished_at: string | null;
+};
+
+export type AccountRunPublic = {
+  id: string;
+  workspace_id: string;
+  run_id: string;
+  social_account_id: string;
+  status: string;
+  error_code: string | null;
+  started_at: string | null;
+  finished_at: string | null;
+};
+
+export type ActionPublic = {
+  id: string;
+  workspace_id: string;
+  account_run_id: string;
+  action_type: string;
+  platform_key: string;
+  target_external_id: string | null;
+  target_url: string | null;
+  idempotency_key: string;
+  status: string;
+  error_code: string | null;
+  metadata: Record<string, unknown>;
+  created_at: string;
+  started_at: string | null;
+  finished_at: string | null;
+};
+
+export type RunDetail = {
+  run: RunPublic;
+  account_runs: AccountRunPublic[];
+  actions: ActionPublic[];
+};

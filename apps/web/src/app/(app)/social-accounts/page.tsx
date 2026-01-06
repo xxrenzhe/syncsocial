@@ -267,7 +267,7 @@ export default function SocialAccountsPage() {
                   <div>Expires：{new Date(s.session.expires_at).toLocaleString()}</div>
                   {!s.session.remote_url ? (
                     <div style={{ opacity: 0.7 }}>
-                      remote_url 暂为空（当前为本地交互模式：后端已尝试在服务器打开浏览器窗口；后续将接入 noVNC 并返回可访问链接）。
+                      remote_url 为空：当前 Browser Cluster 未配置远程可视化（可能是 local 模式或未设置 NOVNC_PUBLIC_URL）。
                     </div>
                   ) : null}
                 </div>

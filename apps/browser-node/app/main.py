@@ -6,6 +6,7 @@ from typing import Annotated
 from fastapi import Depends, FastAPI, Header, HTTPException, status
 from pydantic import BaseModel, Field
 
+from app.automation import execute_action
 from app.config import settings
 from app.session_manager import session_manager
 
@@ -24,6 +25,24 @@ class CreateLoginSessionRequest(BaseModel):
 
 class CreateLoginSessionResponse(BaseModel):
     remote_url: str | None
+
+
+class ExecuteActionRequest(BaseModel):
+    platform_key: str = Field(min_length=1, max_length=32)
+    action_type: str = Field(min_length=1, max_length=64)
+    storage_state: dict
+    target_url: str | None = Field(default=None, max_length=2000)
+    target_external_id: str | None = Field(default=None, max_length=200)
+    bandwidth_mode: str | None = Field(default=None, max_length=16)
+
+
+class ExecuteActionResponse(BaseModel):
+    status: str
+    error_code: str | None = None
+    message: str | None = None
+    current_url: str | None = None
+    screenshot_base64: str | None = None
+    metadata: dict = Field(default_factory=dict)
 
 
 @app.get("/health")
@@ -62,3 +81,23 @@ def stop_session_endpoint(login_session_id: uuid.UUID, _: None = Depends(require
     session_manager.stop(login_session_id=login_session_id)
     return {"ok": True}
 
+
+@app.post("/automation/actions/execute", response_model=ExecuteActionResponse)
+def execute_action_endpoint(payload: ExecuteActionRequest, _: None = Depends(require_internal_token)) -> ExecuteActionResponse:
+    result = execute_action(
+        platform_key=payload.platform_key,
+        action_type=payload.action_type,
+        storage_state=payload.storage_state,
+        target_url=payload.target_url,
+        target_external_id=payload.target_external_id,
+        bandwidth_mode=payload.bandwidth_mode if payload.bandwidth_mode else None,
+        headless=settings.headless,
+    )
+    return ExecuteActionResponse(
+        status=result.status,
+        error_code=result.error_code,
+        message=result.message,
+        current_url=result.current_url,
+        screenshot_base64=result.screenshot_base64,
+        metadata=result.metadata,
+    )

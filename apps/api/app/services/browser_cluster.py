@@ -89,6 +89,19 @@ class LocalPlaywrightBrowserCluster:
             finally:
                 runtime.playwright.stop()
 
+    def execute_action(
+        self,
+        *,
+        platform_key: str,
+        action_type: str,
+        storage_state: dict,
+        target_url: str | None = None,
+        target_external_id: str | None = None,
+        bandwidth_mode: str | None = None,
+    ) -> dict:
+        raise RuntimeError("Local browser cluster does not support action execution yet; use BROWSER_CLUSTER_MODE=remote")
+
+
 class RemoteBrowserCluster:
     def __init__(self, *, base_url: str, internal_token: str | None = None) -> None:
         self._base_url = base_url.rstrip("/")
@@ -135,6 +148,29 @@ class RemoteBrowserCluster:
 
     def stop_login_session(self, *, login_session_id: uuid.UUID) -> None:
         self._request_json("POST", f"/login-sessions/{login_session_id}/stop")
+
+    def execute_action(
+        self,
+        *,
+        platform_key: str,
+        action_type: str,
+        storage_state: dict,
+        target_url: str | None = None,
+        target_external_id: str | None = None,
+        bandwidth_mode: str | None = None,
+    ) -> dict:
+        return self._request_json(
+            "POST",
+            "/automation/actions/execute",
+            {
+                "platform_key": platform_key,
+                "action_type": action_type,
+                "storage_state": storage_state,
+                "target_url": target_url,
+                "target_external_id": target_external_id,
+                "bandwidth_mode": bandwidth_mode,
+            },
+        )
 
 
 if settings.browser_cluster_mode.strip().lower() == "remote":

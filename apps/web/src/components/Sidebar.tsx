@@ -8,6 +8,9 @@ type NavItem = { href: string; label: string };
 const userNav: NavItem[] = [
   { href: "/", label: "仪表盘" },
   { href: "/social-accounts", label: "账号管理" },
+  { href: "/strategies", label: "策略中心" },
+  { href: "/schedules", label: "执行计划" },
+  { href: "/runs", label: "运行记录" },
 ];
 const adminNav: NavItem[] = [{ href: "/admin/users", label: "用户管理" }];
 
@@ -15,7 +18,8 @@ function NavList({ items, activePath }: { items: NavItem[]; activePath: string }
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
       {items.map((it) => {
-        const active = activePath === it.href;
+        const active =
+          it.href === "/" ? activePath === "/" : activePath === it.href || activePath.startsWith(`${it.href}/`);
         return (
           <Link
             key={it.href}

@@ -5,6 +5,8 @@ from uuid import UUID
 
 from pydantic import BaseModel
 
+from app.schemas.action import ActionPublic
+
 
 class RunPublic(BaseModel):
     id: UUID
@@ -32,4 +34,4 @@ class AccountRunPublic(BaseModel):
 class RunDetail(BaseModel):
     run: RunPublic
     account_runs: list[AccountRunPublic]
-
+    actions: list[ActionPublic] = []
