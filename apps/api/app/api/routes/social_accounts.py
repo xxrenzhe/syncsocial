@@ -13,6 +13,7 @@ from app.models.social_account import SocialAccount
 from app.models.user import User
 from app.schemas.login_session import LoginSessionPublic
 from app.schemas.social_account import CreateSocialAccountRequest, SocialAccountPublic
+from app.services.browser_cluster import browser_cluster
 from app.utils.time import utc_now
 
 router = APIRouter()
@@ -78,4 +79,16 @@ def create_login_session(
     db.add(row)
     db.commit()
     db.refresh(row)
+    try:
+        remote_url = browser_cluster.start_login_session(login_session_id=row.id, platform_key=account.platform_key)
+        row.status = "active"
+        row.remote_url = remote_url
+        db.add(row)
+        db.commit()
+        db.refresh(row)
+    except Exception:
+        row.status = "failed"
+        db.add(row)
+        db.commit()
+
     return LoginSessionPublic.model_validate(row, from_attributes=True)
