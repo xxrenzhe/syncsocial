@@ -6,7 +6,7 @@ from typing import Annotated
 from fastapi import Depends, FastAPI, Header, HTTPException, status
 from pydantic import BaseModel, Field
 
-from app.automation import execute_action
+from app.automation import execute_action, execute_actions_batch
 from app.config import settings
 from app.session_manager import session_manager
 
@@ -43,6 +43,23 @@ class ExecuteActionResponse(BaseModel):
     current_url: str | None = None
     screenshot_base64: str | None = None
     metadata: dict = Field(default_factory=dict)
+
+
+class ExecuteActionBatchItem(BaseModel):
+    action_type: str = Field(min_length=1, max_length=64)
+    target_url: str | None = Field(default=None, max_length=2000)
+    target_external_id: str | None = Field(default=None, max_length=200)
+
+
+class ExecuteActionsBatchRequest(BaseModel):
+    platform_key: str = Field(min_length=1, max_length=32)
+    storage_state: dict
+    bandwidth_mode: str | None = Field(default=None, max_length=16)
+    actions: list[ExecuteActionBatchItem] = Field(default_factory=list)
+
+
+class ExecuteActionsBatchResponse(BaseModel):
+    results: list[ExecuteActionResponse]
 
 
 @app.get("/health")
@@ -100,4 +117,30 @@ def execute_action_endpoint(payload: ExecuteActionRequest, _: None = Depends(req
         current_url=result.current_url,
         screenshot_base64=result.screenshot_base64,
         metadata=result.metadata,
+    )
+
+
+@app.post("/automation/actions/execute-batch", response_model=ExecuteActionsBatchResponse)
+def execute_actions_batch_endpoint(
+    payload: ExecuteActionsBatchRequest, _: None = Depends(require_internal_token)
+) -> ExecuteActionsBatchResponse:
+    results = execute_actions_batch(
+        platform_key=payload.platform_key,
+        actions=[item.model_dump() for item in payload.actions],
+        storage_state=payload.storage_state,
+        bandwidth_mode=payload.bandwidth_mode if payload.bandwidth_mode else None,
+        headless=settings.headless,
+    )
+    return ExecuteActionsBatchResponse(
+        results=[
+            ExecuteActionResponse(
+                status=item.status,
+                error_code=item.error_code,
+                message=item.message,
+                current_url=item.current_url,
+                screenshot_base64=item.screenshot_base64,
+                metadata=item.metadata,
+            )
+            for item in results
+        ]
     )

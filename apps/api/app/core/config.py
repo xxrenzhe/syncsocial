@@ -40,6 +40,8 @@ class Settings(BaseSettings):
 
     login_session_auto_capture: bool = Field(default=True, alias="LOGIN_SESSION_AUTO_CAPTURE")
 
+    artifacts_dir: str = Field(default=".local/artifacts", alias="ARTIFACTS_DIR")
+
     redis_url: str = Field(default="redis://localhost:6379/0", alias="REDIS_URL")
     celery_task_always_eager: bool = Field(default=False, alias="CELERY_TASK_ALWAYS_EAGER")
 

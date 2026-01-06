@@ -119,9 +119,20 @@ export type ActionPublic = {
   status: string;
   error_code: string | null;
   metadata: Record<string, unknown>;
+  artifacts: ArtifactPublic[];
   created_at: string;
   started_at: string | null;
   finished_at: string | null;
+};
+
+export type ArtifactPublic = {
+  id: string;
+  workspace_id: string;
+  action_id: string;
+  type: string;
+  storage_key: string;
+  size: number | null;
+  created_at: string;
 };
 
 export type RunDetail = {

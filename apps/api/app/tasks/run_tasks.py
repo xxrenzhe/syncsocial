@@ -1,15 +1,19 @@
 from __future__ import annotations
 
+import base64
 import re
 import uuid
+from pathlib import Path
 
 from sqlalchemy import select
 
 from app.celery_app import celery_app
+from app.core.config import settings
 from app.core.crypto import decrypt_json
 from app.db.session import SessionLocal
 from app.models.account_run import AccountRun
 from app.models.action import Action
+from app.models.artifact import Artifact
 from app.models.credential import Credential
 from app.models.run import Run
 from app.models.social_account import SocialAccount
@@ -76,63 +80,111 @@ def execute_account_run(account_run_id: str) -> None:
             return
 
         action_specs = _build_action_specs(strategy, account_run=account_run, account=account)
+        actions_to_execute: list[Action] = []
+        execute_payload: list[dict] = []
+        bandwidth_mode = None
+
         for spec in action_specs:
             action = _create_action(db, account_run=account_run, strategy=strategy, account=account, spec=spec)
             if action is None:
                 continue
-
             if action.status in {"succeeded", "skipped"}:
                 continue
 
-            action.status = "running"
-            action.started_at = utc_now()
-            db.add(action)
-            db.commit()
-            db.refresh(action)
-
-            result = browser_cluster.execute_action(
-                platform_key=account.platform_key,
-                action_type=action.action_type,
-                storage_state=storage_state,
-                target_url=action.target_url,
-                target_external_id=action.target_external_id,
-                bandwidth_mode=_normalize_bandwidth_mode(spec.get("bandwidth_mode")),
+            actions_to_execute.append(action)
+            execute_payload.append(
+                {
+                    "action_type": action.action_type,
+                    "target_url": action.target_url,
+                    "target_external_id": action.target_external_id,
+                }
             )
 
-            status_value = str(result.get("status") or "failed")
-            error_code = str(result.get("error_code")) if result.get("error_code") else None
-            message = str(result.get("message")) if result.get("message") else None
-            current_url = str(result.get("current_url")) if result.get("current_url") else None
-            screenshot_base64 = str(result.get("screenshot_base64")) if result.get("screenshot_base64") else None
-            metadata = result.get("metadata") if isinstance(result.get("metadata"), dict) else {}
+            if bandwidth_mode is None:
+                bandwidth_mode = _normalize_bandwidth_mode(spec.get("bandwidth_mode"))
 
-            action.error_code = error_code
-            action.metadata_ = {
-                **(action.metadata_ or {}),
-                "message": message,
-                "current_url": current_url,
-                "screenshot_base64": screenshot_base64,
-                "result_metadata": metadata,
-            }
-            action.finished_at = utc_now()
-            if status_value == "succeeded":
-                action.status = "succeeded"
-            elif status_value == "skipped":
-                action.status = "skipped"
-            else:
-                action.status = "failed"
-
-            db.add(action)
+        if actions_to_execute:
+            started_at = utc_now()
+            for action in actions_to_execute:
+                action.status = "running"
+                action.started_at = started_at
+                db.add(action)
             db.commit()
 
-            if action.error_code == "AUTH_REQUIRED":
+            try:
+                results = browser_cluster.execute_actions(
+                    platform_key=account.platform_key,
+                    storage_state=storage_state,
+                    actions=execute_payload,
+                    bandwidth_mode=bandwidth_mode,
+                )
+            except Exception as exc:
+                finished_at = utc_now()
+                for action in actions_to_execute:
+                    action.status = "failed"
+                    action.error_code = "BROWSER_NODE_ERROR"
+                    action.metadata_ = {**(action.metadata_ or {}), "message": str(exc)}
+                    action.finished_at = finished_at
+                    db.add(action)
+                db.commit()
+                _fail_account_run(db, account_run, run, error_code="BROWSER_NODE_ERROR")
+                return
+
+            if len(results) != len(actions_to_execute):
+                finished_at = utc_now()
+                for action in actions_to_execute:
+                    action.status = "failed"
+                    action.error_code = "BROWSER_NODE_ERROR"
+                    action.metadata_ = {**(action.metadata_ or {}), "message": "Browser node returned mismatched results"}
+                    action.finished_at = finished_at
+                    db.add(action)
+                db.commit()
+                _fail_account_run(db, account_run, run, error_code="BROWSER_NODE_ERROR")
+                return
+
+            failures: list[tuple[Action, str | None]] = []
+            now_finished = utc_now()
+            for action, result in zip(actions_to_execute, results, strict=True):
+                status_value = str(result.get("status") or "failed")
+                error_code = str(result.get("error_code")) if result.get("error_code") else None
+                message = str(result.get("message")) if result.get("message") else None
+                current_url = str(result.get("current_url")) if result.get("current_url") else None
+                screenshot_base64 = str(result.get("screenshot_base64")) if result.get("screenshot_base64") else None
+                metadata = result.get("metadata") if isinstance(result.get("metadata"), dict) else {}
+
+                action.error_code = error_code
+                action.metadata_ = {
+                    **(action.metadata_ or {}),
+                    "message": message,
+                    "current_url": current_url,
+                    "result_metadata": metadata,
+                }
+                action.finished_at = now_finished
+                if status_value == "succeeded":
+                    action.status = "succeeded"
+                elif status_value == "skipped":
+                    action.status = "skipped"
+                else:
+                    action.status = "failed"
+                    failures.append((action, error_code))
+
+                if screenshot_base64:
+                    artifact = _store_screenshot_artifact(action, screenshot_base64)
+                    if artifact is not None:
+                        db.add(artifact)
+
+                db.add(action)
+
+            if any(err == "AUTH_REQUIRED" for _, err in failures):
                 account.status = "needs_login"
                 account.last_health_check_at = utc_now()
                 db.add(account)
-                db.commit()
 
-            if action.status == "failed":
-                _fail_account_run(db, account_run, run, error_code=action.error_code or "ACTION_FAILED")
+            db.commit()
+
+            if failures:
+                cause = next((err for _, err in failures if err and err != "ABORTED"), None) or failures[0][1] or "ACTION_FAILED"
+                _fail_account_run(db, account_run, run, error_code=cause)
                 return
 
         account_run.status = "succeeded"
@@ -289,3 +341,29 @@ def _create_action(
     db.commit()
     db.refresh(action)
     return action
+
+
+def _store_screenshot_artifact(action: Action, screenshot_base64: str) -> Artifact | None:
+    try:
+        payload = base64.b64decode(screenshot_base64, validate=True)
+    except Exception:
+        return None
+
+    workspace_prefix = str(action.workspace_id)
+    storage_key = f"{workspace_prefix}/{action.id}-screenshot.png"
+
+    base_dir = Path(settings.artifacts_dir)
+    path = base_dir / storage_key
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(payload)
+    except Exception:
+        return None
+
+    return Artifact(
+        workspace_id=action.workspace_id,
+        action_id=action.id,
+        type="screenshot",
+        storage_key=storage_key,
+        size=len(payload),
+    )

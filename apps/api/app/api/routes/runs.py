@@ -9,9 +9,11 @@ from sqlalchemy.orm import Session
 from app.deps import get_current_user, get_db
 from app.models.account_run import AccountRun
 from app.models.action import Action
+from app.models.artifact import Artifact
 from app.models.run import Run
 from app.models.user import User
 from app.schemas.action import ActionPublic
+from app.schemas.artifact import ArtifactPublic
 from app.schemas.run import AccountRunPublic, RunDetail, RunPublic
 
 router = APIRouter()
@@ -46,11 +48,22 @@ def get_run(run_id: uuid.UUID, user: User = Depends(get_current_user), db: Sessi
             .all()
         )
 
+    action_ids = [a.id for a in actions]
+    artifacts_by_action_id: dict[uuid.UUID, list[ArtifactPublic]] = {}
+    if action_ids:
+        artifacts = (
+            db.scalars(
+                select(Artifact)
+                .where(Artifact.workspace_id == user.workspace_id, Artifact.action_id.in_(action_ids))
+                .order_by(Artifact.created_at.asc())
+            )
+            .all()
+        )
+        for art in artifacts:
+            artifacts_by_action_id.setdefault(art.action_id, []).append(ArtifactPublic.model_validate(art, from_attributes=True))
+
     def to_action_public(action: Action) -> ActionPublic:
         metadata = action.metadata_ if isinstance(action.metadata_, dict) else {}
-        if "screenshot_base64" in metadata:
-            metadata = {**metadata}
-            metadata.pop("screenshot_base64", None)
         return ActionPublic(
             id=action.id,
             workspace_id=action.workspace_id,
@@ -63,6 +76,7 @@ def get_run(run_id: uuid.UUID, user: User = Depends(get_current_user), db: Sessi
             status=action.status,
             error_code=action.error_code,
             metadata=metadata,
+            artifacts=artifacts_by_action_id.get(action.id, []),
             created_at=action.created_at,
             started_at=action.started_at,
             finished_at=action.finished_at,

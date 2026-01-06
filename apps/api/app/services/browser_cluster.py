@@ -101,6 +101,16 @@ class LocalPlaywrightBrowserCluster:
     ) -> dict:
         raise RuntimeError("Local browser cluster does not support action execution yet; use BROWSER_CLUSTER_MODE=remote")
 
+    def execute_actions(
+        self,
+        *,
+        platform_key: str,
+        storage_state: dict,
+        actions: list[dict],
+        bandwidth_mode: str | None = None,
+    ) -> list[dict]:
+        raise RuntimeError("Local browser cluster does not support action execution yet; use BROWSER_CLUSTER_MODE=remote")
+
 
 class RemoteBrowserCluster:
     def __init__(self, *, base_url: str, internal_token: str | None = None) -> None:
@@ -171,6 +181,29 @@ class RemoteBrowserCluster:
                 "bandwidth_mode": bandwidth_mode,
             },
         )
+
+    def execute_actions(
+        self,
+        *,
+        platform_key: str,
+        storage_state: dict,
+        actions: list[dict],
+        bandwidth_mode: str | None = None,
+    ) -> list[dict]:
+        res = self._request_json(
+            "POST",
+            "/automation/actions/execute-batch",
+            {
+                "platform_key": platform_key,
+                "storage_state": storage_state,
+                "bandwidth_mode": bandwidth_mode,
+                "actions": actions,
+            },
+        )
+        results = res.get("results")
+        if not isinstance(results, list):
+            raise RuntimeError("Browser node returned invalid results")
+        return results
 
 
 if settings.browser_cluster_mode.strip().lower() == "remote":

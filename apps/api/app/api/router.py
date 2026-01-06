@@ -1,6 +1,6 @@
 from fastapi import APIRouter
 
-from app.api.routes import admin_users, auth, login_sessions, me, runs, schedules, social_accounts, strategies
+from app.api.routes import admin_users, artifacts, auth, login_sessions, me, runs, schedules, social_accounts, strategies
 
 api_router = APIRouter()
 api_router.include_router(auth.router, prefix="/auth", tags=["auth"])
@@ -10,4 +10,5 @@ api_router.include_router(login_sessions.router, prefix="/login-sessions", tags=
 api_router.include_router(strategies.router, prefix="/strategies", tags=["strategies"])
 api_router.include_router(schedules.router, prefix="/schedules", tags=["schedules"])
 api_router.include_router(runs.router, prefix="/runs", tags=["runs"])
+api_router.include_router(artifacts.router, tags=["artifacts"])
 api_router.include_router(admin_users.router, prefix="/admin", tags=["admin"])

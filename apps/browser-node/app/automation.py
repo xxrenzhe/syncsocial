@@ -104,6 +104,115 @@ def execute_action(
         )
 
 
+def execute_actions_batch(
+    *,
+    platform_key: str,
+    actions: list[dict[str, Any]],
+    storage_state: dict[str, Any],
+    bandwidth_mode: BandwidthMode | None,
+    headless: bool,
+) -> list[ExecuteActionResult]:
+    platform = platform_key.strip().lower()
+    if platform != "x":
+        return [
+            ExecuteActionResult(
+                status="failed",
+                error_code="UNSUPPORTED_PLATFORM",
+                message=f"Unsupported platform: {platform_key}",
+                current_url=None,
+                screenshot_base64=None,
+                metadata={},
+            )
+            for _ in actions
+        ]
+
+    try:
+        with sync_playwright() as pw:
+            browser = pw.chromium.launch(headless=headless)
+            context = browser.new_context(storage_state=storage_state)
+            _install_bandwidth_mode(context, bandwidth_mode)
+            page = context.new_page()
+            page.set_default_timeout(15_000)
+            page.set_default_navigation_timeout(30_000)
+
+            results: list[ExecuteActionResult] = []
+            aborted = False
+            for item in actions:
+                if aborted:
+                    results.append(
+                        ExecuteActionResult(
+                            status="failed",
+                            error_code="ABORTED",
+                            message="Previous action failed",
+                            current_url=str(getattr(page, "url", "")) or None,
+                            screenshot_base64=None,
+                            metadata={},
+                        )
+                    )
+                    continue
+
+                action_type = str(item.get("action_type") or "")
+                target_url = str(item.get("target_url")) if item.get("target_url") else None
+                target_external_id = str(item.get("target_external_id")) if item.get("target_external_id") else None
+                try:
+                    res = _execute_action_on_page(
+                        page,
+                        action_type=action_type,
+                        target_url=target_url,
+                        target_external_id=target_external_id,
+                    )
+                except PlaywrightTimeoutError:
+                    res = ExecuteActionResult(
+                        status="failed",
+                        error_code="NETWORK_TIMEOUT",
+                        message="Playwright timeout",
+                        current_url=str(getattr(page, "url", "")) or None,
+                        screenshot_base64=_safe_screenshot(page),
+                        metadata={},
+                    )
+                except PlaywrightError as exc:
+                    res = ExecuteActionResult(
+                        status="failed",
+                        error_code="BROWSER_ERROR",
+                        message=str(exc),
+                        current_url=str(getattr(page, "url", "")) or None,
+                        screenshot_base64=_safe_screenshot(page),
+                        metadata={},
+                    )
+                except Exception as exc:
+                    res = ExecuteActionResult(
+                        status="failed",
+                        error_code="INTERNAL_ERROR",
+                        message=str(exc),
+                        current_url=str(getattr(page, "url", "")) or None,
+                        screenshot_base64=_safe_screenshot(page),
+                        metadata={},
+                    )
+
+                results.append(res)
+                if res.status == "failed":
+                    aborted = True
+
+            try:
+                context.close()
+            finally:
+                browser.close()
+
+            return results
+    except Exception as exc:
+        return [
+            ExecuteActionResult(
+                status="failed",
+                error_code="BROWSER_ERROR",
+                message=str(exc),
+                current_url=None,
+                screenshot_base64=None,
+                metadata={},
+            )
+            for _ in actions
+        ]
+
+
 def _install_bandwidth_mode(context: Any, mode: BandwidthMode | None) -> None:
     if mode is None:
         return
@@ -131,6 +240,30 @@ def _install_bandwidth_mode(context: Any, mode: BandwidthMode | None) -> None:
         route.continue_()
 
     context.route("**/*", handle_route)
+
+
+def _execute_action_on_page(
+    page: Any,
+    *,
+    action_type: str,
+    target_url: str | None,
+    target_external_id: str | None,
+) -> ExecuteActionResult:
+    action = str(action_type).strip().lower()
+    if action in {"health_check", "x_health_check"}:
+        return _x_health_check(page)
+    if action in {"x_like", "like"}:
+        return _x_like(page, target_url=target_url, tweet_id=target_external_id)
+    if action in {"x_repost", "x_retweet", "retweet", "repost"}:
+        return _x_repost(page, target_url=target_url, tweet_id=target_external_id)
+    return ExecuteActionResult(
+        status="failed",
+        error_code="UNSUPPORTED_ACTION",
+        message=f"Unsupported action_type: {action_type}",
+        current_url=str(getattr(page, "url", "")) or None,
+        screenshot_base64=_safe_screenshot(page),
+        metadata={},
+    )
 
 
 def _x_health_check(page: Any) -> ExecuteActionResult:

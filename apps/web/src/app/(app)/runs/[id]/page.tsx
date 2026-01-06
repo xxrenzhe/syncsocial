@@ -40,6 +40,21 @@ export default function RunDetailPage() {
     return typeof v === "string" ? v : null;
   }
 
+  async function openScreenshot(action: ActionPublic) {
+    const screenshot = action.artifacts?.find((a) => a.type === "screenshot");
+    if (!screenshot) return;
+    try {
+      const res = await auth.apiFetch(`/artifacts/${screenshot.id}/download`);
+      if (!res.ok) throw new Error(await res.text());
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      window.open(url, "_blank", "noopener,noreferrer");
+      window.setTimeout(() => URL.revokeObjectURL(url), 60_000);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "下载失败");
+    }
+  }
+
   return (
     <div style={{ padding: 24 }}>
       <div style={{ display: "flex", gap: 12, alignItems: "center", marginBottom: 16 }}>
@@ -105,6 +120,7 @@ export default function RunDetailPage() {
                   <th style={{ padding: 10 }}>Status</th>
                   <th style={{ padding: 10 }}>Error</th>
                   <th style={{ padding: 10 }}>Target</th>
+                  <th style={{ padding: 10 }}>Artifacts</th>
                   <th style={{ padding: 10 }}>Message</th>
                 </tr>
               </thead>
@@ -120,6 +136,19 @@ export default function RunDetailPage() {
                         <a href={a.target_url} target="_blank" rel="noreferrer">
                           打开
                         </a>
+                      ) : (
+                        "—"
+                      )}
+                    </td>
+                    <td style={{ padding: 10 }}>
+                      {a.artifacts?.some((it) => it.type === "screenshot") ? (
+                        <button
+                          type="button"
+                          onClick={() => void openScreenshot(a)}
+                          style={{ padding: "6px 10px", borderRadius: 8, border: "1px solid #333", background: "transparent" }}
+                        >
+                          截图
+                        </button>
                       ) : (
                         "—"
                       )}
