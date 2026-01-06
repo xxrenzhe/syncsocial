@@ -2,7 +2,7 @@
 
 import { useAuth } from "@/lib/auth";
 import type { LoginSessionPublic, SocialAccountPublic } from "@/lib/types";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 type SessionState = { session: LoginSessionPublic; loading: boolean; error: string | null };
 
@@ -12,6 +12,7 @@ export default function SocialAccountsPage() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [sessions, setSessions] = useState<Record<string, SessionState>>({});
+  const mountedRef = useRef(true);
 
   const platformOptions = useMemo(
     () => [
@@ -43,7 +44,11 @@ export default function SocialAccountsPage() {
   }
 
   useEffect(() => {
+    mountedRef.current = true;
     void loadAccounts();
+    return () => {
+      mountedRef.current = false;
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -79,6 +84,7 @@ export default function SocialAccountsPage() {
       if (!res.ok) throw new Error(await res.text());
       const session = (await res.json()) as LoginSessionPublic;
       setSessions((prev) => ({ ...prev, [account.id]: { session, loading: false, error: null } }));
+      void pollLoginSession(account.id, session.id);
     } catch (err) {
       setSessions((prev) => ({
         ...prev,
@@ -101,6 +107,27 @@ export default function SocialAccountsPage() {
         ...prev,
         [account.id]: { ...prev[account.id], loading: false, error: String(err) } as SessionState,
       }));
+    }
+  }
+
+  async function pollLoginSession(accountId: string, sessionId: string) {
+    for (let i = 0; i < 120; i += 1) {
+      await new Promise((r) => setTimeout(r, 3000));
+      if (!mountedRef.current) return;
+
+      try {
+        const res = await auth.apiFetch(`/login-sessions/${sessionId}`);
+        if (!res.ok) continue;
+        const session = (await res.json()) as LoginSessionPublic;
+        setSessions((prev) => ({ ...prev, [accountId]: { session, loading: false, error: null } }));
+
+        if (["succeeded", "failed", "expired", "canceled"].includes(session.status)) {
+          await loadAccounts();
+          return;
+        }
+      } catch {
+        // ignore
+      }
     }
   }
 
