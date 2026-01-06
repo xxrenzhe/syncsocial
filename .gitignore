@@ -8,6 +8,8 @@ secrets/
 # Env / secrets
 .env
 .env.*
+!.env.example
+!**/.env.example
 
 # Python
 __pycache__/
@@ -22,4 +24,3 @@ node_modules/
 .next/
 dist/
 build/
-

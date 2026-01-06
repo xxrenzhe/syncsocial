@@ -28,6 +28,10 @@ class Settings(BaseSettings):
 
     cors_origins: list[str] = Field(default_factory=lambda: ["http://localhost:3000"], alias="CORS_ORIGINS")
 
+    seed_workspace_name: str = Field(default="Default Workspace", alias="SEED_WORKSPACE_NAME")
+    seed_admin_email: str | None = Field(default=None, alias="SEED_ADMIN_EMAIL")
+    seed_admin_password: str | None = Field(default=None, alias="SEED_ADMIN_PASSWORD")
+
     def normalized_cors_origins(self) -> list[str]:
         value: Any = self.cors_origins
         if isinstance(value, str):
@@ -39,4 +43,3 @@ class Settings(BaseSettings):
 
 
 settings = Settings()
-
