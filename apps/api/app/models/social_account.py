@@ -25,6 +25,7 @@ class SocialAccount(Base):
     display_name: Mapped[str | None] = mapped_column(String(200), nullable=True)
     status: Mapped[str] = mapped_column(String(32), nullable=False, default="needs_login")
     labels: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    fingerprint_profile: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
 
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
@@ -34,4 +35,3 @@ class SocialAccount(Base):
         onupdate=func.now(),
     )
     last_health_check_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-

@@ -331,6 +331,7 @@ def _execute_specs(
             storage_state=storage_state,
             actions=execute_payload,
             bandwidth_mode=bandwidth_mode,
+            fingerprint_profile=getattr(account, "fingerprint_profile", None) or {},
         )
     except Exception as exc:
         finished_at = utc_now()
@@ -387,7 +388,15 @@ def _execute_specs(
 
         db.add(action)
 
-    if any(err == "AUTH_REQUIRED" for _, err in failures):
+    if any(err == "ACCOUNT_LOCKED" for _, err in failures):
+        account.status = "locked"
+        account.last_health_check_at = utc_now()
+        db.add(account)
+    elif any(err == "CAPTCHA_REQUIRED" for _, err in failures):
+        account.status = "needs_login"
+        account.last_health_check_at = utc_now()
+        db.add(account)
+    elif any(err == "AUTH_REQUIRED" for _, err in failures):
         account.status = "needs_login"
         account.last_health_check_at = utc_now()
         db.add(account)

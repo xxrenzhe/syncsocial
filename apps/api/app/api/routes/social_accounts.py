@@ -14,6 +14,7 @@ from app.models.user import User
 from app.schemas.login_session import LoginSessionPublic
 from app.schemas.social_account import CreateSocialAccountRequest, SocialAccountPublic
 from app.services.browser_cluster import browser_cluster
+from app.services.fingerprint import generate_fingerprint_profile
 from app.services.login_session_auto_capture import start_auto_capture
 from app.services.subscription import enforce_max_social_accounts, get_workspace_subscription
 from app.utils.time import utc_now
@@ -62,6 +63,7 @@ def create_social_account(
         display_name=payload.display_name,
         status="needs_login",
         labels=payload.labels,
+        fingerprint_profile=generate_fingerprint_profile(platform_key=platform_key),
     )
     db.add(row)
     db.commit()
@@ -93,7 +95,11 @@ def create_login_session(
     db.commit()
     db.refresh(row)
     try:
-        remote_url = browser_cluster.start_login_session(login_session_id=row.id, platform_key=account.platform_key)
+        remote_url = browser_cluster.start_login_session(
+            login_session_id=row.id,
+            platform_key=account.platform_key,
+            fingerprint_profile=getattr(account, "fingerprint_profile", None) or {},
+        )
         row.status = "active"
         row.remote_url = remote_url
         db.add(row)

@@ -27,7 +27,9 @@ class LocalPlaywrightBrowserCluster:
         self._lock = threading.Lock()
         self._sessions: dict[uuid.UUID, LoginRuntime] = {}
 
-    def start_login_session(self, *, login_session_id: uuid.UUID, platform_key: str) -> str | None:
+    def start_login_session(
+        self, *, login_session_id: uuid.UUID, platform_key: str, fingerprint_profile: dict | None = None
+    ) -> str | None:
         adapter = get_login_adapter(platform_key)
         login_url = adapter.get_login_url()
 
@@ -42,7 +44,8 @@ class LocalPlaywrightBrowserCluster:
 
         playwright = sync_playwright().start()
         browser = playwright.chromium.launch(headless=False)
-        context = browser.new_context()
+        context_kwargs = _context_kwargs_from_fingerprint(fingerprint_profile or {})
+        context = browser.new_context(**context_kwargs)
         page = context.new_page()
         page.goto(login_url)
 
@@ -99,6 +102,7 @@ class LocalPlaywrightBrowserCluster:
         target_external_id: str | None = None,
         bandwidth_mode: str | None = None,
         action_params: dict | None = None,
+        fingerprint_profile: dict | None = None,
     ) -> dict:
         raise RuntimeError("Local browser cluster does not support action execution yet; use BROWSER_CLUSTER_MODE=remote")
 
@@ -109,6 +113,7 @@ class LocalPlaywrightBrowserCluster:
         storage_state: dict,
         actions: list[dict],
         bandwidth_mode: str | None = None,
+        fingerprint_profile: dict | None = None,
     ) -> list[dict]:
         raise RuntimeError("Local browser cluster does not support action execution yet; use BROWSER_CLUSTER_MODE=remote")
 
@@ -141,11 +146,17 @@ class RemoteBrowserCluster:
             return {}
         return json.loads(body.decode("utf-8"))
 
-    def start_login_session(self, *, login_session_id: uuid.UUID, platform_key: str) -> str | None:
+    def start_login_session(
+        self, *, login_session_id: uuid.UUID, platform_key: str, fingerprint_profile: dict | None = None
+    ) -> str | None:
         res = self._request_json(
             "POST",
             "/login-sessions",
-            {"login_session_id": str(login_session_id), "platform_key": platform_key},
+            {
+                "login_session_id": str(login_session_id),
+                "platform_key": platform_key,
+                "fingerprint_profile": fingerprint_profile or {},
+            },
         )
         remote_url = res.get("remote_url")
         return str(remote_url) if remote_url else None
@@ -170,6 +181,7 @@ class RemoteBrowserCluster:
         target_external_id: str | None = None,
         bandwidth_mode: str | None = None,
         action_params: dict | None = None,
+        fingerprint_profile: dict | None = None,
     ) -> dict:
         return self._request_json(
             "POST",
@@ -182,6 +194,7 @@ class RemoteBrowserCluster:
                 "target_external_id": target_external_id,
                 "bandwidth_mode": bandwidth_mode,
                 "action_params": action_params or {},
+                "fingerprint_profile": fingerprint_profile or {},
             },
         )
 
@@ -192,6 +205,7 @@ class RemoteBrowserCluster:
         storage_state: dict,
         actions: list[dict],
         bandwidth_mode: str | None = None,
+        fingerprint_profile: dict | None = None,
     ) -> list[dict]:
         res = self._request_json(
             "POST",
@@ -200,6 +214,7 @@ class RemoteBrowserCluster:
                 "platform_key": platform_key,
                 "storage_state": storage_state,
                 "bandwidth_mode": bandwidth_mode,
+                "fingerprint_profile": fingerprint_profile or {},
                 "actions": actions,
             },
         )
@@ -207,6 +222,49 @@ class RemoteBrowserCluster:
         if not isinstance(results, list):
             raise RuntimeError("Browser node returned invalid results")
         return results
+
+
+def _context_kwargs_from_fingerprint(profile: dict) -> dict:
+    if not isinstance(profile, dict) or not profile:
+        return {}
+
+    kwargs: dict = {}
+    user_agent = profile.get("user_agent")
+    if isinstance(user_agent, str) and user_agent.strip():
+        kwargs["user_agent"] = user_agent.strip()
+
+    viewport = profile.get("viewport")
+    if isinstance(viewport, dict):
+        width = viewport.get("width")
+        height = viewport.get("height")
+        if isinstance(width, int) and isinstance(height, int) and width > 0 and height > 0:
+            kwargs["viewport"] = {"width": width, "height": height}
+
+    locale = profile.get("locale")
+    if isinstance(locale, str) and locale.strip():
+        kwargs["locale"] = locale.strip()
+
+    timezone_id = profile.get("timezone_id")
+    if isinstance(timezone_id, str) and timezone_id.strip():
+        kwargs["timezone_id"] = timezone_id.strip()
+
+    color_scheme = profile.get("color_scheme")
+    if isinstance(color_scheme, str) and color_scheme.strip():
+        kwargs["color_scheme"] = color_scheme.strip()
+
+    device_scale_factor = profile.get("device_scale_factor")
+    if isinstance(device_scale_factor, (int, float)) and device_scale_factor > 0:
+        kwargs["device_scale_factor"] = float(device_scale_factor)
+
+    is_mobile = profile.get("is_mobile")
+    if isinstance(is_mobile, bool):
+        kwargs["is_mobile"] = is_mobile
+
+    has_touch = profile.get("has_touch")
+    if isinstance(has_touch, bool):
+        kwargs["has_touch"] = has_touch
+
+    return kwargs
 
 
 if settings.browser_cluster_mode.strip().lower() == "remote":

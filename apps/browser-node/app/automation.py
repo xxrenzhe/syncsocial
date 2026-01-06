@@ -35,6 +35,7 @@ def execute_action(
     target_external_id: str | None,
     bandwidth_mode: BandwidthMode | None,
     action_params: dict[str, Any] | None,
+    fingerprint_profile: dict[str, Any] | None,
     headless: bool,
 ) -> ExecuteActionResult:
     platform = platform_key.strip().lower()
@@ -53,7 +54,8 @@ def execute_action(
     try:
         with sync_playwright() as pw:
             browser = pw.chromium.launch(headless=headless)
-            context = browser.new_context(storage_state=storage_state)
+            context_kwargs = {"storage_state": storage_state, **_context_kwargs_from_fingerprint(fingerprint_profile or {})}
+            context = browser.new_context(**context_kwargs)
             _install_bandwidth_mode(context, bandwidth_mode)
             page = context.new_page()
             page.set_default_timeout(15_000)
@@ -120,6 +122,7 @@ def execute_actions_batch(
     actions: list[dict[str, Any]],
     storage_state: dict[str, Any],
     bandwidth_mode: BandwidthMode | None,
+    fingerprint_profile: dict[str, Any] | None,
     headless: bool,
 ) -> list[ExecuteActionResult]:
     platform = platform_key.strip().lower()
@@ -139,7 +142,8 @@ def execute_actions_batch(
     try:
         with sync_playwright() as pw:
             browser = pw.chromium.launch(headless=headless)
-            context = browser.new_context(storage_state=storage_state)
+            context_kwargs = {"storage_state": storage_state, **_context_kwargs_from_fingerprint(fingerprint_profile or {})}
+            context = browser.new_context(**context_kwargs)
             _install_bandwidth_mode(context, bandwidth_mode)
             page = context.new_page()
             page.set_default_timeout(15_000)
@@ -254,6 +258,49 @@ def _install_bandwidth_mode(context: Any, mode: BandwidthMode | None) -> None:
     context.route("**/*", handle_route)
 
 
+def _context_kwargs_from_fingerprint(profile: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(profile, dict) or not profile:
+        return {}
+
+    kwargs: dict[str, Any] = {}
+    user_agent = profile.get("user_agent")
+    if isinstance(user_agent, str) and user_agent.strip():
+        kwargs["user_agent"] = user_agent.strip()
+
+    viewport = profile.get("viewport")
+    if isinstance(viewport, dict):
+        width = viewport.get("width")
+        height = viewport.get("height")
+        if isinstance(width, int) and isinstance(height, int) and width > 0 and height > 0:
+            kwargs["viewport"] = {"width": width, "height": height}
+
+    locale = profile.get("locale")
+    if isinstance(locale, str) and locale.strip():
+        kwargs["locale"] = locale.strip()
+
+    timezone_id = profile.get("timezone_id")
+    if isinstance(timezone_id, str) and timezone_id.strip():
+        kwargs["timezone_id"] = timezone_id.strip()
+
+    color_scheme = profile.get("color_scheme")
+    if isinstance(color_scheme, str) and color_scheme.strip():
+        kwargs["color_scheme"] = color_scheme.strip()
+
+    device_scale_factor = profile.get("device_scale_factor")
+    if isinstance(device_scale_factor, (int, float)) and device_scale_factor > 0:
+        kwargs["device_scale_factor"] = float(device_scale_factor)
+
+    is_mobile = profile.get("is_mobile")
+    if isinstance(is_mobile, bool):
+        kwargs["is_mobile"] = is_mobile
+
+    has_touch = profile.get("has_touch")
+    if isinstance(has_touch, bool):
+        kwargs["has_touch"] = has_touch
+
+    return kwargs
+
+
 def _execute_action_on_page(
     page: Any,
     *,
@@ -301,6 +348,17 @@ def _x_search_collect(page: Any, *, search_url: str | None, params: dict[str, An
     verified_only_dom = bool(params.get("verified_only_dom") is True)
 
     page.goto(str(search_url), wait_until="domcontentloaded")
+    risk = _x_detect_risk(page)
+    if risk is not None:
+        screenshot = _safe_screenshot(page)
+        return ExecuteActionResult(
+            status="failed",
+            error_code=risk,
+            message="Risk challenge detected",
+            current_url=str(page.url),
+            screenshot_base64=screenshot,
+            metadata={"risk": risk},
+        )
     if not _x_is_logged_in(page):
         screenshot = _safe_screenshot(page)
         return ExecuteActionResult(
@@ -415,6 +473,17 @@ def _get_int(source: dict[str, Any], key: str, *, default: int, min_value: int, 
 
 def _x_health_check(page: Any) -> ExecuteActionResult:
     page.goto("https://x.com/home", wait_until="domcontentloaded")
+    risk = _x_detect_risk(page)
+    if risk is not None:
+        screenshot = _safe_screenshot(page)
+        return ExecuteActionResult(
+            status="failed",
+            error_code=risk,
+            message="Risk challenge detected",
+            current_url=str(page.url),
+            screenshot_base64=screenshot,
+            metadata={"risk": risk},
+        )
     logged_in = _x_is_logged_in(page)
     if logged_in:
         return ExecuteActionResult(
@@ -464,6 +533,41 @@ def _x_is_logged_in(page: Any) -> bool:
     return False
 
 
+def _x_detect_risk(page: Any) -> str | None:
+    url = str(getattr(page, "url", "") or "")
+    lowered = url.lower()
+    if "/account/access" in lowered:
+        return "ACCOUNT_LOCKED"
+    if "/i/flow/verify" in lowered:
+        return "CAPTCHA_REQUIRED"
+    if "captcha" in lowered or "challenge" in lowered:
+        return "CAPTCHA_REQUIRED"
+
+    try:
+        if page.locator("iframe[src*='arkoselabs'], iframe[src*='arkose']").count() > 0:
+            return "CAPTCHA_REQUIRED"
+        if page.locator("iframe[title*='captcha' i]").count() > 0:
+            return "CAPTCHA_REQUIRED"
+    except Exception:
+        pass
+
+    try:
+        if page.locator(
+            "text=/Verify you are human|unusual activity|suspicious activity|Are you a robot|Help us keep X safe/i"
+        ).count() > 0:
+            return "CAPTCHA_REQUIRED"
+    except Exception:
+        pass
+
+    try:
+        if page.locator("text=/账号已锁定|需要验证|检测到异常/i").count() > 0:
+            return "ACCOUNT_LOCKED"
+    except Exception:
+        pass
+
+    return None
+
+
 def _x_like(page: Any, *, target_url: str | None, tweet_id: str | None) -> ExecuteActionResult:
     if target_url is None or not str(target_url).strip():
         return ExecuteActionResult(
@@ -476,6 +580,18 @@ def _x_like(page: Any, *, target_url: str | None, tweet_id: str | None) -> Execu
         )
 
     page.goto(str(target_url), wait_until="domcontentloaded")
+
+    risk = _x_detect_risk(page)
+    if risk is not None:
+        screenshot = _safe_screenshot(page)
+        return ExecuteActionResult(
+            status="failed",
+            error_code=risk,
+            message="Risk challenge detected",
+            current_url=str(page.url),
+            screenshot_base64=screenshot,
+            metadata={"risk": risk},
+        )
 
     if not _x_is_logged_in(page):
         screenshot = _safe_screenshot(page)
@@ -586,6 +702,18 @@ def _x_reply(page: Any, *, target_url: str | None, tweet_id: str | None, params:
         )
 
     page.goto(str(target_url), wait_until="domcontentloaded")
+
+    risk = _x_detect_risk(page)
+    if risk is not None:
+        screenshot = _safe_screenshot(page)
+        return ExecuteActionResult(
+            status="failed",
+            error_code=risk,
+            message="Risk challenge detected",
+            current_url=str(page.url),
+            screenshot_base64=screenshot,
+            metadata={"risk": risk},
+        )
 
     if not _x_is_logged_in(page):
         screenshot = _safe_screenshot(page)
@@ -736,6 +864,18 @@ def _x_quote(page: Any, *, target_url: str | None, tweet_id: str | None, params:
         )
 
     page.goto(str(target_url), wait_until="domcontentloaded")
+
+    risk = _x_detect_risk(page)
+    if risk is not None:
+        screenshot = _safe_screenshot(page)
+        return ExecuteActionResult(
+            status="failed",
+            error_code=risk,
+            message="Risk challenge detected",
+            current_url=str(page.url),
+            screenshot_base64=screenshot,
+            metadata={"risk": risk},
+        )
 
     if not _x_is_logged_in(page):
         screenshot = _safe_screenshot(page)
@@ -983,6 +1123,18 @@ def _x_repost(page: Any, *, target_url: str | None, tweet_id: str | None) -> Exe
         )
 
     page.goto(str(target_url), wait_until="domcontentloaded")
+
+    risk = _x_detect_risk(page)
+    if risk is not None:
+        screenshot = _safe_screenshot(page)
+        return ExecuteActionResult(
+            status="failed",
+            error_code=risk,
+            message="Risk challenge detected",
+            current_url=str(page.url),
+            screenshot_base64=screenshot,
+            metadata={"risk": risk},
+        )
 
     if not _x_is_logged_in(page):
         screenshot = _safe_screenshot(page)

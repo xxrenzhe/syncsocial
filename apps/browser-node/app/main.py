@@ -21,6 +21,7 @@ def require_internal_token(x_internal_token: Annotated[str | None, Header()] = N
 class CreateLoginSessionRequest(BaseModel):
     login_session_id: uuid.UUID
     platform_key: str = Field(min_length=1, max_length=32)
+    fingerprint_profile: dict = Field(default_factory=dict)
 
 
 class CreateLoginSessionResponse(BaseModel):
@@ -35,6 +36,7 @@ class ExecuteActionRequest(BaseModel):
     target_external_id: str | None = Field(default=None, max_length=200)
     bandwidth_mode: str | None = Field(default=None, max_length=16)
     action_params: dict = Field(default_factory=dict)
+    fingerprint_profile: dict = Field(default_factory=dict)
 
 
 class ExecuteActionResponse(BaseModel):
@@ -57,6 +59,7 @@ class ExecuteActionsBatchRequest(BaseModel):
     platform_key: str = Field(min_length=1, max_length=32)
     storage_state: dict
     bandwidth_mode: str | None = Field(default=None, max_length=16)
+    fingerprint_profile: dict = Field(default_factory=dict)
     actions: list[ExecuteActionBatchItem] = Field(default_factory=list)
 
 
@@ -72,7 +75,11 @@ def health() -> dict:
 @app.post("/login-sessions", response_model=CreateLoginSessionResponse)
 def create_login_session(payload: CreateLoginSessionRequest, _: None = Depends(require_internal_token)) -> CreateLoginSessionResponse:
     try:
-        remote_url = session_manager.start_login(login_session_id=payload.login_session_id, platform_key=payload.platform_key)
+        remote_url = session_manager.start_login(
+            login_session_id=payload.login_session_id,
+            platform_key=payload.platform_key,
+            fingerprint_profile=payload.fingerprint_profile,
+        )
     except KeyError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
     return CreateLoginSessionResponse(remote_url=remote_url)
@@ -111,6 +118,7 @@ def execute_action_endpoint(payload: ExecuteActionRequest, _: None = Depends(req
         target_external_id=payload.target_external_id,
         bandwidth_mode=payload.bandwidth_mode if payload.bandwidth_mode else None,
         action_params=payload.action_params,
+        fingerprint_profile=payload.fingerprint_profile,
         headless=settings.headless,
     )
     return ExecuteActionResponse(
@@ -132,6 +140,7 @@ def execute_actions_batch_endpoint(
         actions=[item.model_dump() for item in payload.actions],
         storage_state=payload.storage_state,
         bandwidth_mode=payload.bandwidth_mode if payload.bandwidth_mode else None,
+        fingerprint_profile=payload.fingerprint_profile,
         headless=settings.headless,
     )
     return ExecuteActionsBatchResponse(
