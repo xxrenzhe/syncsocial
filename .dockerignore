@@ -1,0 +1,21 @@
+.git
+.DS_Store
+
+# Never include local-only materials
+docs
+oldcode
+secrets
+
+# Local dev data
+**/.local
+**/.venv
+**/*.db
+
+# Python caches
+**/__pycache__
+**/*.pyc
+
+# Node caches
+**/node_modules
+**/.next
+

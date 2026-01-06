@@ -38,7 +38,7 @@ class LocalPlaywrightBrowserCluster:
         try:
             from playwright.sync_api import sync_playwright
         except Exception as exc:  # pragma: no cover
-            raise RuntimeError("Playwright is not installed; run pip install -r requirements.txt") from exc
+            raise RuntimeError("Playwright is not installed; run pip install -r requirements.local.txt") from exc
 
         playwright = sync_playwright().start()
         browser = playwright.chromium.launch(headless=False)

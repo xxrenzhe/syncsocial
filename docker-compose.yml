@@ -1,4 +1,42 @@
 services:
+  api:
+    build:
+      context: ./apps/api
+    environment:
+      DATABASE_URL: postgresql+psycopg://syncsocial:syncsocial@postgres:5432/syncsocial
+      JWT_SECRET_KEY: ${JWT_SECRET_KEY:-dev-secret}
+      REFRESH_TOKEN_PEPPER: ${REFRESH_TOKEN_PEPPER:-dev-pepper}
+      CREDENTIAL_ENCRYPTION_KEY: ${CREDENTIAL_ENCRYPTION_KEY:-}
+      CORS_ORIGINS: http://localhost:3000
+      BROWSER_CLUSTER_MODE: remote
+      BROWSER_NODE_API_BASE_URL: http://browser-node:9300
+      BROWSER_NODE_INTERNAL_TOKEN: ${BROWSER_NODE_INTERNAL_TOKEN:-change-me}
+    ports:
+      - "8000:8000"
+    depends_on:
+      - postgres
+
+  web:
+    build:
+      context: ./apps/web
+    environment:
+      NEXT_PUBLIC_API_BASE_URL: http://localhost:8000
+    ports:
+      - "3000:3000"
+    depends_on:
+      - api
+
+  browser-node:
+    build:
+      context: ./apps/browser-node
+    environment:
+      BROWSER_NODE_INTERNAL_TOKEN: ${BROWSER_NODE_INTERNAL_TOKEN:-change-me}
+      NOVNC_PUBLIC_URL: http://localhost:7900/vnc.html?autoconnect=1&resize=remote
+      BROWSER_NODE_HEADLESS: "false"
+    ports:
+      - "9300:9300"
+      - "7900:7900"
+
   postgres:
     image: postgres:16
     environment:
@@ -20,4 +58,3 @@ services:
 volumes:
   pgdata:
   redisdata:
-
