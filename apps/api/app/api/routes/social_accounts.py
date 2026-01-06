@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import timedelta
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -13,6 +13,7 @@ from app.models.social_account import SocialAccount
 from app.models.user import User
 from app.schemas.login_session import LoginSessionPublic
 from app.schemas.social_account import CreateSocialAccountRequest, SocialAccountPublic
+from app.utils.time import utc_now
 
 router = APIRouter()
 
@@ -64,7 +65,7 @@ def create_login_session(
     if account is None or account.workspace_id != user.workspace_id:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Social account not found")
 
-    now = datetime.now(timezone.utc)
+    now = utc_now()
     row = LoginSession(
         workspace_id=user.workspace_id,
         social_account_id=account.id,

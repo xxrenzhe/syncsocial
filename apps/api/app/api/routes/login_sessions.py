@@ -10,13 +10,15 @@ from app.deps import get_current_user, get_db
 from app.models.login_session import LoginSession
 from app.models.user import User
 from app.schemas.login_session import LoginSessionPublic
+from app.utils.time import ensure_utc, utc_now
 
 router = APIRouter()
 
 
 def _expire_if_needed(db: Session, session: LoginSession) -> None:
-    now = datetime.now(timezone.utc)
-    if session.status in {"created", "active"} and session.expires_at <= now:
+    now = utc_now()
+    expires_at = ensure_utc(session.expires_at)
+    if session.status in {"created", "active"} and expires_at <= now:
         session.status = "expired"
         db.add(session)
         db.commit()

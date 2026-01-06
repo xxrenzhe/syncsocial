@@ -18,6 +18,7 @@ from app.deps import get_db, get_request_client_info
 from app.models.refresh_token import RefreshToken
 from app.models.user import User
 from app.schemas.auth import LoginRequest, LogoutRequest, RefreshRequest, TokenResponse
+from app.utils.time import ensure_utc, utc_now
 
 router = APIRouter()
 
@@ -45,7 +46,7 @@ def login(payload: LoginRequest, request: Request, db: Session = Depends(get_db)
 
     refresh_token = generate_refresh_token()
     refresh_token_hash = hash_refresh_token(refresh_token)
-    refresh_expires_at = datetime.now(timezone.utc) + timedelta(days=settings.refresh_token_expire_days)
+    refresh_expires_at = utc_now() + timedelta(days=settings.refresh_token_expire_days)
 
     user_agent, ip = get_request_client_info(request)
     db.add(
@@ -76,8 +77,8 @@ def refresh(payload: RefreshRequest, request: Request, db: Session = Depends(get
     if refresh_row.revoked_at is not None:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Refresh token revoked")
 
-    now = datetime.now(timezone.utc)
-    if refresh_row.expires_at <= now:
+    now = utc_now()
+    if ensure_utc(refresh_row.expires_at) <= now:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Refresh token expired")
 
     user = db.get(User, refresh_row.user_id)
