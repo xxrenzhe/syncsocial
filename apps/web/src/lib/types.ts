@@ -74,6 +74,18 @@ export type AdminSubscriptionOverview = {
   active_reason: string | null;
 };
 
+export type AuditLogPublic = {
+  id: string;
+  workspace_id: string;
+  actor_user_id: string | null;
+  actor_email: string | null;
+  action: string;
+  target_type: string | null;
+  target_id: string | null;
+  metadata: Record<string, unknown>;
+  created_at: string;
+};
+
 export type SocialAccountPublic = {
   id: string;
   workspace_id: string;

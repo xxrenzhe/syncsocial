@@ -15,6 +15,7 @@ const userNav: NavItem[] = [
 const adminNav: NavItem[] = [
   { href: "/admin/users", label: "用户管理" },
   { href: "/admin/subscription", label: "订阅与配额" },
+  { href: "/admin/audit-logs", label: "审计日志" },
 ];
 
 function NavList({ items, activePath }: { items: NavItem[]; activePath: string }) {

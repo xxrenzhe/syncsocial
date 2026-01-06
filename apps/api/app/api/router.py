@@ -1,6 +1,7 @@
 from fastapi import APIRouter
 
 from app.api.routes import (
+    admin_audit_logs,
     admin_subscription,
     admin_users,
     artifacts,
@@ -24,3 +25,4 @@ api_router.include_router(runs.router, prefix="/runs", tags=["runs"])
 api_router.include_router(artifacts.router, tags=["artifacts"])
 api_router.include_router(admin_users.router, prefix="/admin", tags=["admin"])
 api_router.include_router(admin_subscription.router, prefix="/admin", tags=["admin"])
+api_router.include_router(admin_audit_logs.router, prefix="/admin", tags=["admin"])
