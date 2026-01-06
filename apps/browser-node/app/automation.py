@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import random
 import re
+import time
 from dataclasses import dataclass
 from typing import Any, Literal
 
@@ -67,6 +68,10 @@ def execute_action(
                     return _x_repost(page, target_url=target_url, tweet_id=target_external_id)
                 if action in {"x_search_collect", "search_collect"}:
                     return _x_search_collect(page, search_url=target_url, params=action_params or {})
+                if action in {"x_reply", "reply", "comment", "x_comment"}:
+                    return _x_reply(page, target_url=target_url, tweet_id=target_external_id, params=action_params or {})
+                if action in {"x_quote", "quote"}:
+                    return _x_quote(page, target_url=target_url, tweet_id=target_external_id, params=action_params or {})
                 return ExecuteActionResult(
                     status="failed",
                     error_code="UNSUPPORTED_ACTION",
@@ -266,6 +271,10 @@ def _execute_action_on_page(
         return _x_repost(page, target_url=target_url, tweet_id=target_external_id)
     if action in {"x_search_collect", "search_collect"}:
         return _x_search_collect(page, search_url=target_url, params=action_params)
+    if action in {"x_reply", "reply", "comment", "x_comment"}:
+        return _x_reply(page, target_url=target_url, tweet_id=target_external_id, params=action_params)
+    if action in {"x_quote", "quote"}:
+        return _x_quote(page, target_url=target_url, tweet_id=target_external_id, params=action_params)
     return ExecuteActionResult(
         status="failed",
         error_code="UNSUPPORTED_ACTION",
@@ -552,6 +561,414 @@ def _x_like(page: Any, *, target_url: str | None, tweet_id: str | None) -> Execu
             screenshot_base64=screenshot,
             metadata={"already_liked": False},
         )
+
+
+def _x_reply(page: Any, *, target_url: str | None, tweet_id: str | None, params: dict[str, Any]) -> ExecuteActionResult:
+    if target_url is None or not str(target_url).strip():
+        return ExecuteActionResult(
+            status="failed",
+            error_code="INVALID_TARGET",
+            message="target_url is required for x_reply",
+            current_url=None,
+            screenshot_base64=None,
+            metadata={},
+        )
+
+    text = str(params.get("text") or "").strip()
+    if not text:
+        return ExecuteActionResult(
+            status="failed",
+            error_code="INVALID_PARAMS",
+            message="action_params.text is required for x_reply",
+            current_url=None,
+            screenshot_base64=None,
+            metadata={},
+        )
+
+    page.goto(str(target_url), wait_until="domcontentloaded")
+
+    if not _x_is_logged_in(page):
+        screenshot = _safe_screenshot(page)
+        return ExecuteActionResult(
+            status="failed",
+            error_code="AUTH_REQUIRED",
+            message="Not logged in",
+            current_url=str(page.url),
+            screenshot_base64=screenshot,
+            metadata={"logged_in": False},
+        )
+
+    try:
+        if tweet_id and str(tweet_id).strip():
+            article = page.locator("article").filter(has=page.locator(f'a[href*=\"/status/{tweet_id}\"]')).first
+        else:
+            article = page.locator("article").first
+        article.wait_for(state="visible", timeout=10_000)
+    except PlaywrightTimeoutError:
+        screenshot = _safe_screenshot(page)
+        return ExecuteActionResult(
+            status="failed",
+            error_code="UI_SELECTOR_CHANGED",
+            message="Tweet article not found",
+            current_url=str(page.url),
+            screenshot_base64=screenshot,
+            metadata={},
+        )
+
+    try:
+        reply_button = article.locator('button[data-testid="reply"]').first
+        reply_button.wait_for(state="visible", timeout=10_000)
+        reply_button.scroll_into_view_if_needed(timeout=5_000)
+        reply_button.click(timeout=5_000)
+        page.wait_for_timeout(random.randint(900, 1600))
+    except PlaywrightTimeoutError:
+        screenshot = _safe_screenshot(page)
+        return ExecuteActionResult(
+            status="failed",
+            error_code="UI_INTERCEPTED",
+            message="Reply button not clickable",
+            current_url=str(page.url),
+            screenshot_base64=screenshot,
+            metadata={},
+        )
+    except PlaywrightError as exc:
+        screenshot = _safe_screenshot(page)
+        return ExecuteActionResult(
+            status="failed",
+            error_code="BROWSER_ERROR",
+            message=str(exc),
+            current_url=str(page.url),
+            screenshot_base64=screenshot,
+            metadata={},
+        )
+
+    if _x_has_reply_restriction(page):
+        _x_dismiss_reply_restriction(page)
+        return ExecuteActionResult(
+            status="skipped",
+            error_code="REPLY_RESTRICTED",
+            message="Reply restricted by author",
+            current_url=str(page.url),
+            screenshot_base64=None,
+            metadata={},
+        )
+
+    dialog = page.locator("div[role='dialog'][aria-modal='true']").first
+    scope = dialog if dialog.count() > 0 else page
+    try:
+        textarea = scope.locator("[data-testid='tweetTextarea_0']").first
+        textarea.wait_for(state="visible", timeout=12_000)
+        textarea.click(timeout=5_000)
+        _x_type_text(page, text)
+    except PlaywrightTimeoutError:
+        screenshot = _safe_screenshot(page)
+        return ExecuteActionResult(
+            status="failed",
+            error_code="UI_SELECTOR_CHANGED",
+            message="Reply textarea not found",
+            current_url=str(page.url),
+            screenshot_base64=screenshot,
+            metadata={},
+        )
+
+    try:
+        post_button = scope.locator("[data-testid='tweetButton'], [data-testid='tweetButtonInline']").first
+        post_button.wait_for(state="visible", timeout=10_000)
+        _wait_for_enabled(page, post_button, timeout_ms=5_000)
+        post_button.click(timeout=5_000)
+    except PlaywrightTimeoutError:
+        screenshot = _safe_screenshot(page)
+        return ExecuteActionResult(
+            status="failed",
+            error_code="UI_INTERCEPTED",
+            message="Reply submit not clickable",
+            current_url=str(page.url),
+            screenshot_base64=screenshot,
+            metadata={},
+        )
+    except PlaywrightError as exc:
+        screenshot = _safe_screenshot(page)
+        return ExecuteActionResult(
+            status="failed",
+            error_code="BROWSER_ERROR",
+            message=str(exc),
+            current_url=str(page.url),
+            screenshot_base64=screenshot,
+            metadata={},
+        )
+
+    if dialog.count() > 0:
+        try:
+            dialog.wait_for(state="detached", timeout=15_000)
+        except Exception:
+            pass
+
+    return ExecuteActionResult(
+        status="succeeded",
+        error_code=None,
+        message=None,
+        current_url=str(page.url),
+        screenshot_base64=None,
+        metadata={},
+    )
+
+
+def _x_quote(page: Any, *, target_url: str | None, tweet_id: str | None, params: dict[str, Any]) -> ExecuteActionResult:
+    if target_url is None or not str(target_url).strip():
+        return ExecuteActionResult(
+            status="failed",
+            error_code="INVALID_TARGET",
+            message="target_url is required for x_quote",
+            current_url=None,
+            screenshot_base64=None,
+            metadata={},
+        )
+
+    text = str(params.get("text") or "").strip()
+    if not text:
+        return ExecuteActionResult(
+            status="failed",
+            error_code="INVALID_PARAMS",
+            message="action_params.text is required for x_quote",
+            current_url=None,
+            screenshot_base64=None,
+            metadata={},
+        )
+
+    page.goto(str(target_url), wait_until="domcontentloaded")
+
+    if not _x_is_logged_in(page):
+        screenshot = _safe_screenshot(page)
+        return ExecuteActionResult(
+            status="failed",
+            error_code="AUTH_REQUIRED",
+            message="Not logged in",
+            current_url=str(page.url),
+            screenshot_base64=screenshot,
+            metadata={"logged_in": False},
+        )
+
+    try:
+        if tweet_id and str(tweet_id).strip():
+            article = page.locator("article").filter(has=page.locator(f'a[href*=\"/status/{tweet_id}\"]')).first
+        else:
+            article = page.locator("article").first
+        article.wait_for(state="visible", timeout=10_000)
+    except PlaywrightTimeoutError:
+        screenshot = _safe_screenshot(page)
+        return ExecuteActionResult(
+            status="failed",
+            error_code="UI_SELECTOR_CHANGED",
+            message="Tweet article not found",
+            current_url=str(page.url),
+            screenshot_base64=screenshot,
+            metadata={},
+        )
+
+    if article.locator('button[data-testid="unretweet"]').count() > 0:
+        return ExecuteActionResult(
+            status="skipped",
+            error_code=None,
+            message="Already reposted",
+            current_url=str(page.url),
+            screenshot_base64=None,
+            metadata={"already_reposted": True},
+        )
+
+    try:
+        repost_button = article.locator('button[data-testid="retweet"]').first
+        repost_button.wait_for(state="visible", timeout=10_000)
+        repost_button.scroll_into_view_if_needed(timeout=5_000)
+        repost_button.click(timeout=5_000)
+    except PlaywrightTimeoutError:
+        screenshot = _safe_screenshot(page)
+        return ExecuteActionResult(
+            status="failed",
+            error_code="UI_INTERCEPTED",
+            message="Repost button not clickable",
+            current_url=str(page.url),
+            screenshot_base64=screenshot,
+            metadata={},
+        )
+    except PlaywrightError as exc:
+        screenshot = _safe_screenshot(page)
+        return ExecuteActionResult(
+            status="failed",
+            error_code="BROWSER_ERROR",
+            message=str(exc),
+            current_url=str(page.url),
+            screenshot_base64=screenshot,
+            metadata={},
+        )
+
+    try:
+        dropdown = page.locator("[data-testid='Dropdown'], [role='menu']").first
+        dropdown.wait_for(state="visible", timeout=6_000)
+        quote_option = dropdown.locator("a[href*='/compose/post'], a[href*='/compose/tweet'], a[href*='/compose'], [data-testid='retweetWithComment']").first
+        quote_option.wait_for(state="visible", timeout=4_000)
+        quote_option.click(timeout=5_000)
+        page.wait_for_timeout(random.randint(900, 1600))
+    except PlaywrightTimeoutError:
+        screenshot = _safe_screenshot(page)
+        return ExecuteActionResult(
+            status="failed",
+            error_code="UI_SELECTOR_CHANGED",
+            message="Quote option not found",
+            current_url=str(page.url),
+            screenshot_base64=screenshot,
+            metadata={},
+        )
+    except PlaywrightError as exc:
+        screenshot = _safe_screenshot(page)
+        return ExecuteActionResult(
+            status="failed",
+            error_code="BROWSER_ERROR",
+            message=str(exc),
+            current_url=str(page.url),
+            screenshot_base64=screenshot,
+            metadata={},
+        )
+
+    textarea = _find_visible_locator(
+        page,
+        [
+            "div[role='dialog'][aria-modal='true'] [data-testid='tweetTextarea_0']",
+            "[data-testid='tweetTextarea_0'][role='textbox']",
+            "[data-testid='tweetTextarea_0']",
+        ],
+        timeout_ms=20_000,
+    )
+    if textarea is None:
+        screenshot = _safe_screenshot(page)
+        return ExecuteActionResult(
+            status="failed",
+            error_code="UI_SELECTOR_CHANGED",
+            message="Quote textarea not found",
+            current_url=str(page.url),
+            screenshot_base64=screenshot,
+            metadata={},
+        )
+
+    try:
+        textarea.click(timeout=5_000)
+        _x_type_text(page, text)
+    except PlaywrightTimeoutError:
+        screenshot = _safe_screenshot(page)
+        return ExecuteActionResult(
+            status="failed",
+            error_code="UI_INTERCEPTED",
+            message="Cannot type quote text",
+            current_url=str(page.url),
+            screenshot_base64=screenshot,
+            metadata={},
+        )
+
+    try:
+        post_button = page.locator("[data-testid='tweetButton'], [data-testid='tweetButtonInline']").first
+        post_button.wait_for(state="visible", timeout=10_000)
+        _wait_for_enabled(page, post_button, timeout_ms=5_000)
+        post_button.click(timeout=5_000)
+        page.wait_for_timeout(random.randint(1200, 2200))
+    except PlaywrightTimeoutError:
+        screenshot = _safe_screenshot(page)
+        return ExecuteActionResult(
+            status="failed",
+            error_code="UI_INTERCEPTED",
+            message="Quote submit not clickable",
+            current_url=str(page.url),
+            screenshot_base64=screenshot,
+            metadata={},
+        )
+    except PlaywrightError as exc:
+        screenshot = _safe_screenshot(page)
+        return ExecuteActionResult(
+            status="failed",
+            error_code="BROWSER_ERROR",
+            message=str(exc),
+            current_url=str(page.url),
+            screenshot_base64=screenshot,
+            metadata={},
+        )
+
+    return ExecuteActionResult(
+        status="succeeded",
+        error_code=None,
+        message=None,
+        current_url=str(page.url),
+        screenshot_base64=None,
+        metadata={},
+    )
+
+
+def _x_has_reply_restriction(page: Any) -> bool:
+    try:
+        loc = page.locator("text=/Who can reply|who can reply|Mentioned|mentioned|谁可以回复/").first
+        return loc.count() > 0 and loc.is_visible()
+    except Exception:
+        return False
+
+
+def _x_dismiss_reply_restriction(page: Any) -> None:
+    for label in ["Got it", "got it", "OK", "Ok", "知道了", "确定"]:
+        try:
+            btn = page.locator(f"button:has-text('{label}')").first
+            if btn.count() > 0:
+                btn.click(timeout=2_000)
+                return
+        except Exception:
+            continue
+
+
+def _x_type_text(page: Any, text: str) -> None:
+    safe = text.strip()
+    if not safe:
+        return
+    for chunk in _split_text(safe, max_len=160):
+        page.keyboard.type(chunk, delay=random.randint(35, 75))
+        page.wait_for_timeout(random.randint(120, 260))
+
+
+def _split_text(text: str, *, max_len: int) -> list[str]:
+    if len(text) <= max_len:
+        return [text]
+    parts: list[str] = []
+    remaining = text
+    while remaining:
+        parts.append(remaining[:max_len])
+        remaining = remaining[max_len:]
+    return parts
+
+
+def _find_visible_locator(page: Any, selectors: list[str], *, timeout_ms: int) -> Any | None:
+    deadline = time.monotonic() + timeout_ms / 1000.0
+    while True:
+        for selector in selectors:
+            try:
+                loc = page.locator(selector).first
+                if loc.count() == 0:
+                    continue
+                if loc.is_visible():
+                    return loc
+            except Exception:
+                continue
+        if time.monotonic() > deadline:
+            break
+        page.wait_for_timeout(250)
+    return None
+
+
+def _wait_for_enabled(page: Any, locator: Any, *, timeout_ms: int) -> None:
+    try:
+        handle = locator.element_handle()
+        if handle is None:
+            return
+        page.wait_for_function(
+            "(el) => { if (!el) return false; const aria = el.getAttribute('aria-disabled'); if (aria === 'true') return false; if (typeof el.disabled !== 'undefined' && el.disabled) return false; return true; }",
+            handle,
+            timeout=timeout_ms,
+        )
+    except Exception:
+        return
 
 
 def _x_repost(page: Any, *, target_url: str | None, tweet_id: str | None) -> ExecuteActionResult:

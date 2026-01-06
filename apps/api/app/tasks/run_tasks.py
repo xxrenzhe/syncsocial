@@ -5,6 +5,7 @@ import random
 import re
 import uuid
 import urllib.parse
+from datetime import date, timedelta
 from pathlib import Path
 
 from sqlalchemy import select
@@ -82,7 +83,20 @@ def execute_account_run(account_run_id: str) -> None:
             return
 
         strategy_type = _strategy_type(strategy)
-        if strategy_type in {"x_search_like", "x_search_repost", "x_verified_like", "x_verified_repost"}:
+        if _strategy_requires_action_text(strategy_type) and not _resolve_action_text(strategy):
+            _fail_account_run(db, account_run, run, error_code="STRATEGY_CONFIG_INVALID")
+            return
+
+        if strategy_type in {
+            "x_search_like",
+            "x_search_repost",
+            "x_search_reply",
+            "x_search_quote",
+            "x_verified_like",
+            "x_verified_repost",
+            "x_verified_reply",
+            "x_verified_quote",
+        }:
             search_specs = _build_search_collect_specs(strategy, account_run=account_run, account=account, run=run)
             executed_actions, results, error_code = _execute_specs(
                 db,
@@ -202,7 +216,8 @@ def _build_action_specs(strategy: Strategy, *, account_run: AccountRun, account:
     action_kind = str(config.get("type") or "").strip().lower()
     if account.platform_key != "x":
         return specs
-    if action_kind not in {"x_like", "like", "x_repost", "x_retweet", "retweet", "repost"}:
+    action_type = _resolve_action_type(action_kind)
+    if action_type is None:
         return specs
 
     raw_targets = config.get("targets") or config.get("target_urls") or []
@@ -223,20 +238,29 @@ def _build_action_specs(strategy: Strategy, *, account_run: AccountRun, account:
     if isinstance(max_actions, int) and max_actions > 0:
         targets = targets[: max_actions]
 
+    window_suffix = ""
+    if action_type in {"x_reply", "x_quote"}:
+        window_days = _get_int_from_config(config, "repeat_window_days", default=7, min_value=1, max_value=365)
+        window_suffix = f":w{_idempotency_window_key(window_days)}"
+
     for target in targets:
         tweet_id = target.get("tweet_id") or None
         stable_target = tweet_id or target.get("url")
         if not stable_target:
             continue
-        action_type = "x_like" if action_kind in {"x_like", "like"} else "x_repost"
+        action_params = None
+        if action_type in {"x_reply", "x_quote"}:
+            text = _resolve_action_text(strategy)
+            action_params = {"text": text} if text else {}
         specs.append(
             {
                 "action_type": action_type,
                 "platform_key": "x",
                 "target_url": target.get("url"),
                 "target_external_id": tweet_id,
-                "idempotency_key": f"{account_run.workspace_id}:{account.id}:{action_type}:{stable_target}:v{strategy.version}",
+                "idempotency_key": f"{account_run.workspace_id}:{account.id}:{action_type}:{stable_target}:v{strategy.version}{window_suffix}",
                 "bandwidth_mode": bandwidth_mode,
+                "action_params": action_params or {},
             }
         )
 
@@ -384,6 +408,70 @@ def _strategy_type(strategy: Strategy) -> str:
     return str(config.get("type") or "").strip().lower()
 
 
+def _resolve_action_type(action_kind: str) -> str | None:
+    kind = str(action_kind or "").strip().lower()
+    if kind in {"x_like", "like"}:
+        return "x_like"
+    if kind in {"x_repost", "x_retweet", "retweet", "repost"}:
+        return "x_repost"
+    if kind in {"x_reply", "reply", "comment", "x_comment"}:
+        return "x_reply"
+    if kind in {"x_quote", "quote"}:
+        return "x_quote"
+    return None
+
+
+def _strategy_requires_action_text(strategy_type: str) -> bool:
+    kind = str(strategy_type or "").strip().lower()
+    return kind.endswith("reply") or kind.endswith("comment") or kind.endswith("quote")
+
+
+def _resolve_action_text(strategy: Strategy) -> str | None:
+    config = strategy.config if isinstance(strategy.config, dict) else {}
+    kind = _strategy_type(strategy)
+
+    if kind.endswith("quote") or kind in {"x_quote", "quote"}:
+        string_keys = ["quote_text", "text"]
+        list_keys = ["quote_texts", "texts"]
+    elif kind.endswith("reply") or kind.endswith("comment") or kind in {"x_reply", "reply", "comment", "x_comment"}:
+        string_keys = ["reply_text", "text"]
+        list_keys = ["reply_texts", "texts"]
+    else:
+        string_keys = ["text"]
+        list_keys = ["texts"]
+
+    for key in string_keys:
+        raw = config.get(key)
+        if isinstance(raw, str) and raw.strip():
+            return raw.strip()
+
+    for key in list_keys:
+        raw_list = config.get(key)
+        if isinstance(raw_list, list):
+            cleaned = [str(item).strip() for item in raw_list if str(item).strip()]
+            if cleaned:
+                return random.choice(cleaned)
+
+    return None
+
+
+def _idempotency_window_key(window_days: int) -> str:
+    now = utc_now()
+    if window_days <= 1:
+        return now.date().isoformat()
+    if window_days == 7:
+        iso = now.isocalendar()
+        return f"{iso.year}-W{iso.week:02d}"
+    if window_days in {28, 29, 30, 31}:
+        return f"{now.year}-{now.month:02d}"
+
+    epoch = date(1970, 1, 1)
+    days_since_epoch = (now.date() - epoch).days
+    index = days_since_epoch // window_days
+    window_start = epoch + timedelta(days=index * window_days)
+    return window_start.isoformat()
+
+
 def _build_search_collect_specs(
     strategy: Strategy, *, account_run: AccountRun, account: SocialAccount, run: Run
 ) -> list[dict]:
@@ -461,7 +549,17 @@ def _build_search_action_specs(
     bandwidth_mode = config.get("bandwidth_mode")
 
     action_kind = _strategy_type(strategy)
-    action_type = "x_like" if action_kind.endswith("like") else "x_repost"
+    action_type: str
+    if action_kind.endswith("like"):
+        action_type = "x_like"
+    elif action_kind.endswith("repost") or action_kind.endswith("retweet"):
+        action_type = "x_repost"
+    elif action_kind.endswith("reply") or action_kind.endswith("comment"):
+        action_type = "x_reply"
+    elif action_kind.endswith("quote"):
+        action_type = "x_quote"
+    else:
+        return []
     max_actions = _get_int_from_config(config, "max_actions", default=3, min_value=1, max_value=50)
     verified_only = bool(config.get("verified_only") is True or action_kind.startswith("x_verified_"))
 
@@ -481,20 +579,30 @@ def _build_search_action_specs(
         picked.append({"tweet_id": tweet_id, "url": url})
 
     specs: list[dict] = []
+    window_suffix = ""
+    if action_type in {"x_reply", "x_quote"}:
+        window_days = _get_int_from_config(config, "repeat_window_days", default=7, min_value=1, max_value=365)
+        window_suffix = f":w{_idempotency_window_key(window_days)}"
+
     for item in picked:
         tweet_id = item.get("tweet_id") or None
         url = item.get("url") or None
         stable_target = tweet_id or url
         if not stable_target:
             continue
+        action_params = None
+        if action_type in {"x_reply", "x_quote"}:
+            text = _resolve_action_text(strategy)
+            action_params = {"text": text} if text else {}
         specs.append(
             {
                 "action_type": action_type,
                 "platform_key": "x",
                 "target_url": url,
                 "target_external_id": tweet_id,
-                "idempotency_key": f"{account_run.workspace_id}:{account.id}:{action_type}:{stable_target}:v{strategy.version}",
+                "idempotency_key": f"{account_run.workspace_id}:{account.id}:{action_type}:{stable_target}:v{strategy.version}{window_suffix}",
                 "bandwidth_mode": bandwidth_mode,
+                "action_params": action_params or {},
             }
         )
     return specs

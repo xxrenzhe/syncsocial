@@ -40,6 +40,20 @@ export default function RunDetailPage() {
     return typeof v === "string" ? v : null;
   }
 
+  function getResultMetadata(action: ActionPublic): Record<string, unknown> | null {
+    const v = action.metadata["result_metadata"];
+    if (!v || typeof v !== "object" || Array.isArray(v)) return null;
+    return v as Record<string, unknown>;
+  }
+
+  function getCandidates(action: ActionPublic): Array<{ tweet_id?: string; url?: string; is_verified?: boolean }> {
+    const rm = getResultMetadata(action);
+    if (!rm) return [];
+    const raw = rm["candidates"];
+    if (!Array.isArray(raw)) return [];
+    return raw.filter((it) => it && typeof it === "object") as Array<{ tweet_id?: string; url?: string; is_verified?: boolean }>;
+  }
+
   async function openScreenshot(action: ActionPublic) {
     const screenshot = action.artifacts?.find((a) => a.type === "screenshot");
     if (!screenshot) return;
@@ -153,7 +167,33 @@ export default function RunDetailPage() {
                         "—"
                       )}
                     </td>
-                    <td style={{ padding: 10, opacity: 0.8 }}>{getMetaString(a, "message") || "—"}</td>
+                    <td style={{ padding: 10, opacity: 0.9 }}>
+                      {a.action_type === "x_search_collect" ? (
+                        <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                          <div style={{ opacity: 0.8 }}>
+                            候选：{getCandidates(a).length}{" "}
+                            {(() => {
+                              const rm = getResultMetadata(a);
+                              const collected = rm?.["collected"];
+                              return typeof collected === "number" ? `（collected=${collected}）` : "";
+                            })()}
+                          </div>
+                          <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                            {getCandidates(a)
+                              .slice(0, 5)
+                              .map((c, idx) =>
+                                c.url ? (
+                                  <a key={`${c.url}-${idx}`} href={c.url} target="_blank" rel="noreferrer" style={{ fontFamily: "monospace" }}>
+                                    {c.tweet_id || `link-${idx + 1}`} {c.is_verified ? "(verified)" : ""}
+                                  </a>
+                                ) : null
+                              )}
+                          </div>
+                        </div>
+                      ) : (
+                        getMetaString(a, "message") || "—"
+                      )}
+                    </td>
                   </tr>
                 ))}
               </tbody>
