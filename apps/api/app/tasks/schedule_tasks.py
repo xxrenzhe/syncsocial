@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import func, select
 
@@ -13,6 +13,14 @@ from app.models.schedule import Schedule
 from app.models.social_account import SocialAccount
 from app.models.strategy import Strategy
 from app.services.schedule_planner import compute_next_run_at, should_skip_run
+from app.services.subscription import (
+    effective_parallel_limit,
+    get_current_month_period_start,
+    get_workspace_subscription,
+    get_workspace_usage_monthly,
+    has_remaining_runtime_quota,
+    is_subscription_active,
+)
 from app.tasks.run_tasks import execute_account_run
 from app.utils.time import utc_now
 
@@ -62,6 +70,23 @@ def tick_schedules() -> None:
             if _has_running_run(db, schedule.id):
                 continue
 
+            subscription = get_workspace_subscription(db, workspace_id=schedule.workspace_id)
+            active_check = is_subscription_active(subscription, now=now)
+            if not active_check.allowed:
+                schedule.next_run_at = now + timedelta(hours=6)
+                db.add(schedule)
+                db.commit()
+                continue
+
+            period_start = get_current_month_period_start(now)
+            usage = get_workspace_usage_monthly(db, workspace_id=schedule.workspace_id, period_start=period_start)
+            runtime_check = has_remaining_runtime_quota(subscription, usage)
+            if not runtime_check.allowed:
+                schedule.next_run_at = now + timedelta(hours=6)
+                db.add(schedule)
+                db.commit()
+                continue
+
             strategy = db.get(Strategy, schedule.strategy_id)
             if strategy is None:
                 schedule.next_run_at = compute_next_run_at(
@@ -87,7 +112,7 @@ def tick_schedules() -> None:
                 db.commit()
                 continue
 
-            run, account_run_ids = _create_run_for_schedule(db, schedule, strategy, now)
+            run, account_run_ids = _create_run_for_schedule(db, schedule, strategy, subscription, now)
             if run is None:
                 continue
 
@@ -111,9 +136,13 @@ def _create_run_for_schedule(
     db,
     schedule: Schedule,
     strategy: Strategy,
+    subscription,
     now: datetime,
 ) -> tuple[Run, list[uuid.UUID]]:
     accounts = _resolve_accounts(db, schedule.workspace_id, schedule.account_selector or {})
+    limit = effective_parallel_limit(subscription, schedule_max_parallel=schedule.max_parallel)
+    if len(accounts) > limit:
+        accounts = accounts[:limit]
     run = Run(
         workspace_id=schedule.workspace_id,
         schedule_id=schedule.id,

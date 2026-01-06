@@ -22,6 +22,7 @@ from app.models.run import Run
 from app.models.social_account import SocialAccount
 from app.models.strategy import Strategy
 from app.services.browser_cluster import browser_cluster
+from app.services.subscription import increment_automation_runtime_seconds
 from app.utils.time import utc_now
 
 _TWEET_ID_RE = re.compile(r"/status/(?P<tweet_id>\\d+)")
@@ -156,6 +157,12 @@ def execute_account_run(account_run_id: str) -> None:
         account_run.status = "succeeded"
         account_run.finished_at = utc_now()
         db.add(account_run)
+        increment_automation_runtime_seconds(
+            db,
+            workspace_id=account_run.workspace_id,
+            started_at=account_run.started_at,
+            finished_at=account_run.finished_at,
+        )
         db.commit()
 
         _finalize_run_if_done(db, run.id)
@@ -166,6 +173,12 @@ def _fail_account_run(db, account_run: AccountRun, run: Run, *, error_code: str)
     account_run.error_code = error_code
     account_run.finished_at = utc_now()
     db.add(account_run)
+    increment_automation_runtime_seconds(
+        db,
+        workspace_id=account_run.workspace_id,
+        started_at=account_run.started_at,
+        finished_at=account_run.finished_at,
+    )
     if run.status == "queued":
         run.status = "running"
         run.started_at = utc_now()

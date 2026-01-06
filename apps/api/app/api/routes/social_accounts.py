@@ -15,6 +15,7 @@ from app.schemas.login_session import LoginSessionPublic
 from app.schemas.social_account import CreateSocialAccountRequest, SocialAccountPublic
 from app.services.browser_cluster import browser_cluster
 from app.services.login_session_auto_capture import start_auto_capture
+from app.services.subscription import enforce_max_social_accounts, get_workspace_subscription
 from app.utils.time import utc_now
 
 router = APIRouter()
@@ -42,6 +43,17 @@ def create_social_account(
     platform_key = payload.platform_key.strip().lower()
     if not platform_key:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid platform_key")
+
+    subscription = get_workspace_subscription(db, workspace_id=user.workspace_id)
+    try:
+        enforce_max_social_accounts(db, workspace_id=user.workspace_id, subscription=subscription)
+    except ValueError as exc:
+        if str(exc) == "SOCIAL_ACCOUNT_LIMIT_EXCEEDED":
+            raise HTTPException(
+                status_code=status.HTTP_402_PAYMENT_REQUIRED,
+                detail="Social account limit exceeded; update subscription to add more accounts",
+            ) from None
+        raise
 
     row = SocialAccount(
         workspace_id=user.workspace_id,

@@ -17,6 +17,14 @@ from app.models.user import User
 from app.schemas.run import RunPublic
 from app.schemas.schedule import CreateScheduleRequest, SchedulePublic, UpdateScheduleRequest
 from app.services.schedule_planner import compute_next_run_at
+from app.services.subscription import (
+    effective_parallel_limit,
+    get_current_month_period_start,
+    get_workspace_subscription,
+    get_workspace_usage_monthly,
+    has_remaining_runtime_quota,
+    is_subscription_active,
+)
 from app.tasks.run_tasks import execute_account_run
 from app.utils.time import utc_now
 
@@ -149,7 +157,23 @@ def run_now(
     if strategy is None or strategy.workspace_id != user.workspace_id:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid strategy")
 
+    now = utc_now()
+    subscription = get_workspace_subscription(db, workspace_id=user.workspace_id)
+    active_check = is_subscription_active(subscription, now=now)
+    if not active_check.allowed:
+        raise HTTPException(status_code=status.HTTP_402_PAYMENT_REQUIRED, detail=active_check.reason or "Subscription inactive")
+
+    period_start = get_current_month_period_start(now)
+    usage = get_workspace_usage_monthly(db, workspace_id=user.workspace_id, period_start=period_start)
+    runtime_check = has_remaining_runtime_quota(subscription, usage)
+    if not runtime_check.allowed:
+        raise HTTPException(status_code=status.HTTP_402_PAYMENT_REQUIRED, detail=runtime_check.reason or "Runtime quota exceeded")
+
     accounts = _resolve_accounts(db, user.workspace_id, schedule.account_selector)
+    limit = effective_parallel_limit(subscription, schedule_max_parallel=schedule.max_parallel)
+    if len(accounts) > limit:
+        accounts = accounts[:limit]
+
     run = Run(
         workspace_id=user.workspace_id,
         schedule_id=schedule.id,

@@ -12,7 +12,10 @@ const userNav: NavItem[] = [
   { href: "/schedules", label: "执行计划" },
   { href: "/runs", label: "运行记录" },
 ];
-const adminNav: NavItem[] = [{ href: "/admin/users", label: "用户管理" }];
+const adminNav: NavItem[] = [
+  { href: "/admin/users", label: "用户管理" },
+  { href: "/admin/subscription", label: "订阅与配额" },
+];
 
 function NavList({ items, activePath }: { items: NavItem[]; activePath: string }) {
   return (

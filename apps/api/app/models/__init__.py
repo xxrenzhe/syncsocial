@@ -9,6 +9,7 @@ from app.models.run import Run
 from app.models.schedule import Schedule
 from app.models.social_account import SocialAccount
 from app.models.strategy import Strategy
+from app.models.subscription import WorkspaceSubscription, WorkspaceUsageMonthly
 from app.models.user import User
 from app.models.workspace import Workspace
 
@@ -24,6 +25,8 @@ __all__ = [
     "Schedule",
     "SocialAccount",
     "Strategy",
+    "WorkspaceSubscription",
+    "WorkspaceUsageMonthly",
     "User",
     "Workspace",
 ]

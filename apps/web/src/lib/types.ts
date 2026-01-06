@@ -30,6 +30,50 @@ export type AdminCreateUserResponse = {
   initial_password?: string | null;
 };
 
+export type WorkspaceSubscriptionPublic = {
+  id: string;
+  workspace_id: string;
+  status: string;
+  plan_key: string;
+  seats: number;
+  max_social_accounts: number | null;
+  max_parallel_sessions: number | null;
+  automation_runtime_hours: number | null;
+  artifact_retention_days: number | null;
+  current_period_start: string | null;
+  current_period_end: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export type WorkspaceUsageMonthlyPublic = {
+  id: string;
+  workspace_id: string;
+  period_start: string;
+  automation_runtime_seconds: number;
+  created_at: string;
+  updated_at: string;
+};
+
+export type AdminUpsertWorkspaceSubscriptionRequest = {
+  status: string;
+  plan_key: string;
+  seats: number;
+  max_social_accounts?: number | null;
+  max_parallel_sessions?: number | null;
+  automation_runtime_hours?: number | null;
+  artifact_retention_days?: number | null;
+  current_period_start?: string | null;
+  current_period_end?: string | null;
+};
+
+export type AdminSubscriptionOverview = {
+  subscription: WorkspaceSubscriptionPublic | null;
+  current_month_usage: WorkspaceUsageMonthlyPublic | null;
+  active: boolean;
+  active_reason: string | null;
+};
+
 export type SocialAccountPublic = {
   id: string;
   workspace_id: string;

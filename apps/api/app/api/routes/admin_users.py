@@ -14,6 +14,7 @@ from app.core.security import hash_password
 from app.deps import get_db, require_admin
 from app.models.audit_log import AuditLog
 from app.models.refresh_token import RefreshToken
+from app.services.subscription import enforce_seat_limit, get_workspace_subscription
 from app.models.user import User
 from app.schemas.user import (
     AdminCreateUserRequest,
@@ -66,6 +67,17 @@ def create_user(
     db: Session = Depends(get_db),
 ) -> AdminCreateUserResponse:
     _validate_role(payload.role)
+
+    subscription = get_workspace_subscription(db, workspace_id=admin.workspace_id)
+    try:
+        enforce_seat_limit(db, workspace_id=admin.workspace_id, subscription=subscription)
+    except ValueError as exc:
+        if str(exc) == "SEAT_LIMIT_EXCEEDED":
+            raise HTTPException(
+                status_code=status.HTTP_402_PAYMENT_REQUIRED,
+                detail="Seat limit exceeded; update subscription to add seats",
+            ) from None
+        raise
 
     existing = db.scalar(select(User).where(User.email == str(payload.email).lower()))
     if existing is not None and existing.status != "deleted":
@@ -124,6 +136,18 @@ def update_user(
     user = db.get(User, user_id)
     if user is None or user.workspace_id != admin.workspace_id or user.status == "deleted":
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
+
+    if payload.status == "active" and user.status != "active":
+        subscription = get_workspace_subscription(db, workspace_id=admin.workspace_id)
+        try:
+            enforce_seat_limit(db, workspace_id=admin.workspace_id, subscription=subscription)
+        except ValueError as exc:
+            if str(exc) == "SEAT_LIMIT_EXCEEDED":
+                raise HTTPException(
+                    status_code=status.HTTP_402_PAYMENT_REQUIRED,
+                    detail="Seat limit exceeded; update subscription to add seats",
+                ) from None
+            raise
 
     if payload.role is not None:
         _validate_role(payload.role)
