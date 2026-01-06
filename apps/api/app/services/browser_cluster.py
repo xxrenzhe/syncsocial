@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+import json
 import threading
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from urllib.error import HTTPError, URLError
+from urllib.request import Request, urlopen
 
+from app.core.config import settings
 from app.platforms.registry import get_login_adapter
 
 
@@ -85,5 +89,55 @@ class LocalPlaywrightBrowserCluster:
             finally:
                 runtime.playwright.stop()
 
+class RemoteBrowserCluster:
+    def __init__(self, *, base_url: str) -> None:
+        self._base_url = base_url.rstrip("/")
 
-browser_cluster = LocalPlaywrightBrowserCluster()
+    def _request_json(self, method: str, path: str, payload: dict | None = None) -> dict:
+        url = f"{self._base_url}{path}"
+        data = None
+        headers = {"accept": "application/json"}
+        if payload is not None:
+            data = json.dumps(payload).encode("utf-8")
+            headers["content-type"] = "application/json"
+
+        req = Request(url=url, method=method.upper(), data=data, headers=headers)
+        try:
+            with urlopen(req, timeout=30) as resp:
+                body = resp.read()
+        except HTTPError as exc:
+            raise RuntimeError(f"Browser node error: {exc.code} {exc.reason}") from exc
+        except URLError as exc:
+            raise RuntimeError(f"Browser node unreachable: {exc.reason}") from exc
+
+        if not body:
+            return {}
+        return json.loads(body.decode("utf-8"))
+
+    def start_login_session(self, *, login_session_id: uuid.UUID, platform_key: str) -> str | None:
+        res = self._request_json(
+            "POST",
+            "/login-sessions",
+            {"login_session_id": str(login_session_id), "platform_key": platform_key},
+        )
+        remote_url = res.get("remote_url")
+        return str(remote_url) if remote_url else None
+
+    def is_logged_in(self, *, login_session_id: uuid.UUID) -> bool:
+        res = self._request_json("GET", f"/login-sessions/{login_session_id}/is-logged-in")
+        return bool(res.get("logged_in"))
+
+    def export_storage_state(self, *, login_session_id: uuid.UUID) -> dict:
+        return self._request_json("GET", f"/login-sessions/{login_session_id}/storage-state")
+
+    def stop_login_session(self, *, login_session_id: uuid.UUID) -> None:
+        self._request_json("POST", f"/login-sessions/{login_session_id}/stop")
+
+
+if settings.browser_cluster_mode.strip().lower() == "remote":
+    base_url = settings.browser_node_api_base_url
+    if base_url is None or not base_url.strip():
+        raise RuntimeError("BROWSER_NODE_API_BASE_URL is required when BROWSER_CLUSTER_MODE=remote")
+    browser_cluster = RemoteBrowserCluster(base_url=base_url)
+else:
+    browser_cluster = LocalPlaywrightBrowserCluster()

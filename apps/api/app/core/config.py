@@ -34,6 +34,9 @@ class Settings(BaseSettings):
 
     credential_encryption_key: str | None = Field(default=None, alias="CREDENTIAL_ENCRYPTION_KEY")
 
+    browser_cluster_mode: str = Field(default="local", alias="BROWSER_CLUSTER_MODE")
+    browser_node_api_base_url: str | None = Field(default=None, alias="BROWSER_NODE_API_BASE_URL")
+
     def normalized_cors_origins(self) -> list[str]:
         value: Any = self.cors_origins
         if isinstance(value, str):
