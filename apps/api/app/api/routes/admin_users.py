@@ -103,7 +103,7 @@ def create_user(
             action="admin.user.create",
             target_type="user",
             target_id=user.id,
-            metadata={"email": user.email, "role": user.role},
+            metadata_={"email": user.email, "role": user.role},
         )
     )
     db.commit()
@@ -142,7 +142,7 @@ def update_user(
             action="admin.user.update",
             target_type="user",
             target_id=user.id,
-            metadata={"role": payload.role, "status": payload.status},
+            metadata_={"role": payload.role, "status": payload.status},
         )
     )
     db.commit()
@@ -177,7 +177,7 @@ def delete_user(
             action="admin.user.delete",
             target_type="user",
             target_id=user.id,
-            metadata={"email": user.email},
+            metadata_={"email": user.email},
         )
     )
     db.commit()
@@ -211,7 +211,7 @@ def reset_password(
             action="admin.user.reset_password",
             target_type="user",
             target_id=user.id,
-            metadata={"at": datetime.now(timezone.utc).isoformat()},
+            metadata_={"at": datetime.now(timezone.utc).isoformat()},
         )
     )
     db.commit()

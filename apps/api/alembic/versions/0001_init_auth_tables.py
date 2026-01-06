@@ -10,7 +10,6 @@ from __future__ import annotations
 
 from alembic import op
 import sqlalchemy as sa
-from sqlalchemy.dialects import postgresql
 
 
 # revision identifiers, used by Alembic.
@@ -23,25 +22,25 @@ depends_on = None
 def upgrade() -> None:
     op.create_table(
         "workspaces",
-        sa.Column("id", postgresql.UUID(as_uuid=True), nullable=False),
+        sa.Column("id", sa.Uuid(), nullable=False),
         sa.Column("name", sa.String(length=200), nullable=False),
         sa.Column("status", sa.String(length=32), nullable=False, server_default="active"),
-        sa.Column("created_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.text("now()")),
+        sa.Column("created_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.text("CURRENT_TIMESTAMP")),
         sa.PrimaryKeyConstraint("id"),
     )
 
     op.create_table(
         "users",
-        sa.Column("id", postgresql.UUID(as_uuid=True), nullable=False),
-        sa.Column("workspace_id", postgresql.UUID(as_uuid=True), nullable=False),
+        sa.Column("id", sa.Uuid(), nullable=False),
+        sa.Column("workspace_id", sa.Uuid(), nullable=False),
         sa.Column("email", sa.String(length=320), nullable=False),
         sa.Column("display_name", sa.String(length=200), nullable=True),
         sa.Column("password_hash", sa.String(length=500), nullable=False),
         sa.Column("role", sa.String(length=16), nullable=False, server_default="user"),
         sa.Column("status", sa.String(length=16), nullable=False, server_default="active"),
         sa.Column("must_change_password", sa.Boolean(), nullable=False, server_default=sa.text("false")),
-        sa.Column("created_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.text("now()")),
-        sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.text("now()")),
+        sa.Column("created_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.text("CURRENT_TIMESTAMP")),
+        sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.text("CURRENT_TIMESTAMP")),
         sa.Column("last_login_at", sa.DateTime(timezone=True), nullable=True),
         sa.ForeignKeyConstraint(["workspace_id"], ["workspaces.id"], ondelete="RESTRICT"),
         sa.PrimaryKeyConstraint("id"),
@@ -52,10 +51,10 @@ def upgrade() -> None:
 
     op.create_table(
         "refresh_tokens",
-        sa.Column("id", postgresql.UUID(as_uuid=True), nullable=False),
-        sa.Column("user_id", postgresql.UUID(as_uuid=True), nullable=False),
+        sa.Column("id", sa.Uuid(), nullable=False),
+        sa.Column("user_id", sa.Uuid(), nullable=False),
         sa.Column("token_hash", sa.String(length=128), nullable=False),
-        sa.Column("created_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.text("now()")),
+        sa.Column("created_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.text("CURRENT_TIMESTAMP")),
         sa.Column("expires_at", sa.DateTime(timezone=True), nullable=False),
         sa.Column("revoked_at", sa.DateTime(timezone=True), nullable=True),
         sa.Column("user_agent", sa.String(length=500), nullable=True),
@@ -69,14 +68,14 @@ def upgrade() -> None:
 
     op.create_table(
         "audit_logs",
-        sa.Column("id", postgresql.UUID(as_uuid=True), nullable=False),
-        sa.Column("workspace_id", postgresql.UUID(as_uuid=True), nullable=False),
-        sa.Column("actor_user_id", postgresql.UUID(as_uuid=True), nullable=True),
+        sa.Column("id", sa.Uuid(), nullable=False),
+        sa.Column("workspace_id", sa.Uuid(), nullable=False),
+        sa.Column("actor_user_id", sa.Uuid(), nullable=True),
         sa.Column("action", sa.String(length=200), nullable=False),
         sa.Column("target_type", sa.String(length=100), nullable=True),
-        sa.Column("target_id", postgresql.UUID(as_uuid=True), nullable=True),
-        sa.Column("metadata", postgresql.JSONB(astext_type=sa.Text()), nullable=False, server_default=sa.text("'{}'::jsonb")),
-        sa.Column("created_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.text("now()")),
+        sa.Column("target_id", sa.Uuid(), nullable=True),
+        sa.Column("metadata", sa.JSON(), nullable=False, server_default=sa.text("'{}'")),
+        sa.Column("created_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.text("CURRENT_TIMESTAMP")),
         sa.ForeignKeyConstraint(["actor_user_id"], ["users.id"], ondelete="SET NULL"),
         sa.ForeignKeyConstraint(["workspace_id"], ["workspaces.id"], ondelete="RESTRICT"),
         sa.PrimaryKeyConstraint("id"),
@@ -101,4 +100,3 @@ def downgrade() -> None:
     op.drop_table("users")
 
     op.drop_table("workspaces")
-

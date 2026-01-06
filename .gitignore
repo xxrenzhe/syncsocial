@@ -24,3 +24,7 @@ node_modules/
 .next/
 dist/
 build/
+
+# Local dev data
+**/.local/
+*.db
