@@ -94,6 +94,7 @@ export type SocialAccountPublic = {
   display_name: string | null;
   status: string;
   labels: Record<string, unknown>;
+  proxy_pool_id?: string | null;
   created_at: string;
   updated_at: string;
   last_health_check_at: string | null;
@@ -161,6 +162,8 @@ export type AccountRunPublic = {
   error_code: string | null;
   started_at: string | null;
   finished_at: string | null;
+  retry_count: number;
+  next_retry_at: string | null;
 };
 
 export type ActionPublic = {
@@ -195,4 +198,30 @@ export type RunDetail = {
   run: RunPublic;
   account_runs: AccountRunPublic[];
   actions: ActionPublic[];
+};
+
+export type ProxyPoolPublic = {
+  id: string;
+  workspace_id: string;
+  name: string;
+  strategy: string;
+  created_at: string;
+  updated_at: string;
+};
+
+export type ProxyPublic = {
+  id: string;
+  workspace_id: string;
+  pool_id: string;
+  scheme: string;
+  host: string;
+  port: number;
+  country: string | null;
+  enabled: boolean;
+  weight: number;
+  consecutive_failures: number;
+  last_error_code: string | null;
+  last_checked_at: string | null;
+  created_at: string;
+  updated_at: string;
 };

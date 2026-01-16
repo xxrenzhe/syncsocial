@@ -25,7 +25,12 @@ class SessionManager:
         self._sessions: dict[uuid.UUID, LoginRuntime] = {}
 
     def start_login(
-        self, *, login_session_id: uuid.UUID, platform_key: str, fingerprint_profile: dict | None = None
+        self,
+        *,
+        login_session_id: uuid.UUID,
+        platform_key: str,
+        fingerprint_profile: dict | None = None,
+        proxy: dict | None = None,
     ) -> str | None:
         with self._lock:
             if login_session_id in self._sessions:
@@ -34,7 +39,11 @@ class SessionManager:
         from playwright.sync_api import sync_playwright
 
         pw = sync_playwright().start()
-        browser = pw.chromium.launch(headless=settings.headless)
+        launch_kwargs = {"headless": settings.headless}
+        normalized_proxy = _normalize_proxy(proxy or {})
+        if normalized_proxy:
+            launch_kwargs["proxy"] = normalized_proxy
+        browser = pw.chromium.launch(**launch_kwargs)
         context_kwargs = _context_kwargs_from_fingerprint(fingerprint_profile or {})
         context = browser.new_context(**context_kwargs)
         page = context.new_page()
@@ -126,3 +135,19 @@ def _context_kwargs_from_fingerprint(profile: dict) -> dict:
         kwargs["has_touch"] = has_touch
 
     return kwargs
+
+
+def _normalize_proxy(value: dict) -> dict:
+    if not isinstance(value, dict) or not value:
+        return {}
+    server = value.get("server")
+    if not isinstance(server, str) or not server.strip():
+        return {}
+    payload: dict = {"server": server.strip()}
+    username = value.get("username")
+    if isinstance(username, str) and username.strip():
+        payload["username"] = username.strip()
+    password = value.get("password")
+    if isinstance(password, str) and password.strip():
+        payload["password"] = password.strip()
+    return payload

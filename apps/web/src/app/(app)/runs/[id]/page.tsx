@@ -57,16 +57,45 @@ export default function RunDetailPage() {
   async function openScreenshot(action: ActionPublic) {
     const screenshot = action.artifacts?.find((a) => a.type === "screenshot");
     if (!screenshot) return;
+    await openArtifact(screenshot.id, "screenshot.png", true);
+  }
+
+  async function openArtifact(artifactId: string, filename: string, openInNewTab: boolean) {
     try {
-      const res = await auth.apiFetch(`/artifacts/${screenshot.id}/download`);
+      const res = await auth.apiFetch(`/artifacts/${artifactId}/download`);
       if (!res.ok) throw new Error(await res.text());
       const blob = await res.blob();
       const url = URL.createObjectURL(blob);
-      window.open(url, "_blank", "noopener,noreferrer");
+      if (openInNewTab) {
+        window.open(url, "_blank", "noopener,noreferrer");
+        window.setTimeout(() => URL.revokeObjectURL(url), 60_000);
+        return;
+      }
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = filename;
+      a.rel = "noreferrer";
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
       window.setTimeout(() => URL.revokeObjectURL(url), 60_000);
     } catch (err) {
       setError(err instanceof Error ? err.message : "下载失败");
     }
+  }
+
+  function findArtifact(action: ActionPublic, type: string) {
+    return action.artifacts?.find((a) => a.type === type) ?? null;
+  }
+
+  function getProxyInfo(action: ActionPublic): { proxy_id?: string; server?: string } | null {
+    const raw = action.metadata["proxy"];
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+    const obj = raw as Record<string, unknown>;
+    const proxyId = typeof obj["proxy_id"] === "string" ? obj["proxy_id"] : undefined;
+    const server = typeof obj["server"] === "string" ? obj["server"] : undefined;
+    if (!proxyId && !server) return null;
+    return { proxy_id: proxyId, server };
   }
 
   return (
@@ -109,6 +138,8 @@ export default function RunDetailPage() {
                   <th style={{ padding: 10 }}>SocialAccount</th>
                   <th style={{ padding: 10 }}>Status</th>
                   <th style={{ padding: 10 }}>Error</th>
+                  <th style={{ padding: 10 }}>Retry</th>
+                  <th style={{ padding: 10 }}>Next Retry</th>
                 </tr>
               </thead>
               <tbody>
@@ -118,6 +149,8 @@ export default function RunDetailPage() {
                     <td style={{ padding: 10, fontFamily: "monospace" }}>{ar.social_account_id}</td>
                     <td style={{ padding: 10 }}>{ar.status}</td>
                     <td style={{ padding: 10 }}>{ar.error_code || "—"}</td>
+                    <td style={{ padding: 10 }}>{ar.retry_count}</td>
+                    <td style={{ padding: 10 }}>{ar.next_retry_at ? new Date(ar.next_retry_at).toLocaleString() : "—"}</td>
                   </tr>
                 ))}
               </tbody>
@@ -155,21 +188,53 @@ export default function RunDetailPage() {
                       )}
                     </td>
                     <td style={{ padding: 10 }}>
-                      {a.artifacts?.some((it) => it.type === "screenshot") ? (
-                        <button
-                          type="button"
-                          onClick={() => void openScreenshot(a)}
-                          style={{ padding: "6px 10px", borderRadius: 8, border: "1px solid #333", background: "transparent" }}
-                        >
-                          截图
-                        </button>
-                      ) : (
-                        "—"
-                      )}
+                      <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                        {findArtifact(a, "screenshot") ? (
+                          <button
+                            type="button"
+                            onClick={() => void openScreenshot(a)}
+                            style={{ padding: "6px 10px", borderRadius: 8, border: "1px solid #333", background: "transparent" }}
+                          >
+                            截图
+                          </button>
+                        ) : null}
+                        {findArtifact(a, "dom") ? (
+                          <button
+                            type="button"
+                            onClick={() => {
+                              const dom = findArtifact(a, "dom");
+                              if (!dom) return;
+                              void openArtifact(dom.id, "dom.html", true);
+                            }}
+                            style={{ padding: "6px 10px", borderRadius: 8, border: "1px solid #333", background: "transparent" }}
+                          >
+                            DOM
+                          </button>
+                        ) : null}
+                        {findArtifact(a, "trace") ? (
+                          <button
+                            type="button"
+                            onClick={() => {
+                              const trace = findArtifact(a, "trace");
+                              if (!trace) return;
+                              void openArtifact(trace.id, "trace.zip", false);
+                            }}
+                            style={{ padding: "6px 10px", borderRadius: 8, border: "1px solid #333", background: "transparent" }}
+                          >
+                            Trace
+                          </button>
+                        ) : null}
+                        {!a.artifacts || a.artifacts.length === 0 ? <span style={{ opacity: 0.7 }}>—</span> : null}
+                      </div>
                     </td>
                     <td style={{ padding: 10, opacity: 0.9 }}>
                       {a.action_type === "x_search_collect" ? (
                         <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                          {getProxyInfo(a) ? (
+                            <div style={{ opacity: 0.75, fontSize: 12, fontFamily: "monospace" }}>
+                              proxy: {getProxyInfo(a)?.server || getProxyInfo(a)?.proxy_id}
+                            </div>
+                          ) : null}
                           <div style={{ opacity: 0.8 }}>
                             候选：{getCandidates(a).length}{" "}
                             {(() => {
@@ -191,7 +256,14 @@ export default function RunDetailPage() {
                           </div>
                         </div>
                       ) : (
-                        getMetaString(a, "message") || "—"
+                        <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                          {getProxyInfo(a) ? (
+                            <div style={{ opacity: 0.75, fontSize: 12, fontFamily: "monospace" }}>
+                              proxy: {getProxyInfo(a)?.server || getProxyInfo(a)?.proxy_id}
+                            </div>
+                          ) : null}
+                          <div>{getMetaString(a, "message") || "—"}</div>
+                        </div>
                       )}
                     </td>
                   </tr>

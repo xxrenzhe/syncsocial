@@ -14,6 +14,7 @@ class SocialAccountPublic(BaseModel):
     display_name: str | None
     status: str
     labels: dict
+    proxy_pool_id: UUID | None = None
     created_at: datetime
     updated_at: datetime
     last_health_check_at: datetime | None
@@ -24,4 +25,11 @@ class CreateSocialAccountRequest(BaseModel):
     handle: str | None = Field(default=None, max_length=200)
     display_name: str | None = Field(default=None, max_length=200)
     labels: dict = Field(default_factory=dict)
+    proxy_pool_id: UUID | None = None
 
+
+class UpdateSocialAccountRequest(BaseModel):
+    handle: str | None = Field(default=None, max_length=200)
+    display_name: str | None = Field(default=None, max_length=200)
+    labels: dict | None = None
+    proxy_pool_id: UUID | None = None

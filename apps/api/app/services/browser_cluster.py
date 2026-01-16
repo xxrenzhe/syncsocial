@@ -28,7 +28,12 @@ class LocalPlaywrightBrowserCluster:
         self._sessions: dict[uuid.UUID, LoginRuntime] = {}
 
     def start_login_session(
-        self, *, login_session_id: uuid.UUID, platform_key: str, fingerprint_profile: dict | None = None
+        self,
+        *,
+        login_session_id: uuid.UUID,
+        platform_key: str,
+        fingerprint_profile: dict | None = None,
+        proxy: dict | None = None,
     ) -> str | None:
         adapter = get_login_adapter(platform_key)
         login_url = adapter.get_login_url()
@@ -43,7 +48,10 @@ class LocalPlaywrightBrowserCluster:
             raise RuntimeError("Playwright is not installed; run pip install -r requirements.local.txt") from exc
 
         playwright = sync_playwright().start()
-        browser = playwright.chromium.launch(headless=False)
+        launch_kwargs = {"headless": False}
+        if isinstance(proxy, dict) and proxy:
+            launch_kwargs["proxy"] = proxy
+        browser = playwright.chromium.launch(**launch_kwargs)
         context_kwargs = _context_kwargs_from_fingerprint(fingerprint_profile or {})
         context = browser.new_context(**context_kwargs)
         page = context.new_page()
@@ -103,6 +111,7 @@ class LocalPlaywrightBrowserCluster:
         bandwidth_mode: str | None = None,
         action_params: dict | None = None,
         fingerprint_profile: dict | None = None,
+        proxy: dict | None = None,
     ) -> dict:
         raise RuntimeError("Local browser cluster does not support action execution yet; use BROWSER_CLUSTER_MODE=remote")
 
@@ -114,6 +123,7 @@ class LocalPlaywrightBrowserCluster:
         actions: list[dict],
         bandwidth_mode: str | None = None,
         fingerprint_profile: dict | None = None,
+        proxy: dict | None = None,
     ) -> list[dict]:
         raise RuntimeError("Local browser cluster does not support action execution yet; use BROWSER_CLUSTER_MODE=remote")
 
@@ -147,7 +157,12 @@ class RemoteBrowserCluster:
         return json.loads(body.decode("utf-8"))
 
     def start_login_session(
-        self, *, login_session_id: uuid.UUID, platform_key: str, fingerprint_profile: dict | None = None
+        self,
+        *,
+        login_session_id: uuid.UUID,
+        platform_key: str,
+        fingerprint_profile: dict | None = None,
+        proxy: dict | None = None,
     ) -> str | None:
         res = self._request_json(
             "POST",
@@ -156,6 +171,7 @@ class RemoteBrowserCluster:
                 "login_session_id": str(login_session_id),
                 "platform_key": platform_key,
                 "fingerprint_profile": fingerprint_profile or {},
+                "proxy": proxy or {},
             },
         )
         remote_url = res.get("remote_url")
@@ -182,6 +198,7 @@ class RemoteBrowserCluster:
         bandwidth_mode: str | None = None,
         action_params: dict | None = None,
         fingerprint_profile: dict | None = None,
+        proxy: dict | None = None,
     ) -> dict:
         return self._request_json(
             "POST",
@@ -195,6 +212,7 @@ class RemoteBrowserCluster:
                 "bandwidth_mode": bandwidth_mode,
                 "action_params": action_params or {},
                 "fingerprint_profile": fingerprint_profile or {},
+                "proxy": proxy or {},
             },
         )
 
@@ -206,6 +224,7 @@ class RemoteBrowserCluster:
         actions: list[dict],
         bandwidth_mode: str | None = None,
         fingerprint_profile: dict | None = None,
+        proxy: dict | None = None,
     ) -> list[dict]:
         res = self._request_json(
             "POST",
@@ -215,6 +234,7 @@ class RemoteBrowserCluster:
                 "storage_state": storage_state,
                 "bandwidth_mode": bandwidth_mode,
                 "fingerprint_profile": fingerprint_profile or {},
+                "proxy": proxy or {},
                 "actions": actions,
             },
         )

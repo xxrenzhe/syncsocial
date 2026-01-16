@@ -35,6 +35,13 @@ def download_artifact(
     media_type = "application/octet-stream"
     if row.type == "screenshot" and path.suffix.lower() == ".png":
         media_type = "image/png"
+    elif row.type == "dom" and path.suffix.lower() in {".html", ".htm"}:
+        media_type = "text/html; charset=utf-8"
+    elif path.suffix.lower() == ".json":
+        media_type = "application/json; charset=utf-8"
+    elif path.suffix.lower() in {".txt", ".log"}:
+        media_type = "text/plain; charset=utf-8"
+    elif path.suffix.lower() == ".zip":
+        media_type = "application/zip"
 
     return FileResponse(path=str(path), media_type=media_type, filename=path.name)
-

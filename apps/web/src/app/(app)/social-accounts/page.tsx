@@ -1,7 +1,7 @@
 "use client";
 
 import { useAuth } from "@/lib/auth";
-import type { LoginSessionPublic, SocialAccountPublic } from "@/lib/types";
+import type { LoginSessionPublic, ProxyPoolPublic, SocialAccountPublic } from "@/lib/types";
 import { useEffect, useMemo, useRef, useState } from "react";
 
 type SessionState = { session: LoginSessionPublic; loading: boolean; error: string | null };
@@ -9,6 +9,7 @@ type SessionState = { session: LoginSessionPublic; loading: boolean; error: stri
 export default function SocialAccountsPage() {
   const auth = useAuth();
   const [accounts, setAccounts] = useState<SocialAccountPublic[]>([]);
+  const [proxyPools, setProxyPools] = useState<ProxyPoolPublic[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [sessions, setSessions] = useState<Record<string, SessionState>>({});
@@ -27,15 +28,19 @@ export default function SocialAccountsPage() {
   const [platformKey, setPlatformKey] = useState("x");
   const [handle, setHandle] = useState("");
   const [displayName, setDisplayName] = useState("");
+  const [proxyPoolId, setProxyPoolId] = useState<string>("");
 
   async function loadAccounts() {
     setLoading(true);
     setError(null);
     try {
-      const res = await auth.apiFetch("/social-accounts");
-      if (!res.ok) throw new Error(await res.text());
-      const data = (await res.json()) as SocialAccountPublic[];
-      setAccounts(data);
+      const [aRes, pRes] = await Promise.all([auth.apiFetch("/social-accounts"), auth.apiFetch("/proxy-pools")]);
+      if (!aRes.ok) throw new Error(await aRes.text());
+      if (!pRes.ok) throw new Error(await pRes.text());
+      const aData = (await aRes.json()) as SocialAccountPublic[];
+      const pData = (await pRes.json()) as ProxyPoolPublic[];
+      setAccounts(aData);
+      setProxyPools(pData);
     } catch (err) {
       setError(err instanceof Error ? err.message : "加载失败");
     } finally {
@@ -63,14 +68,30 @@ export default function SocialAccountsPage() {
           handle: handle || null,
           display_name: displayName || null,
           labels: {},
+          proxy_pool_id: proxyPoolId || null,
         }),
       });
       if (!res.ok) throw new Error(await res.text());
       setHandle("");
       setDisplayName("");
+      setProxyPoolId("");
       await loadAccounts();
     } catch (err) {
       setError(err instanceof Error ? err.message : "创建失败");
+    }
+  }
+
+  async function updateAccountProxyPool(account: SocialAccountPublic, nextPoolId: string) {
+    setError(null);
+    try {
+      const res = await auth.apiFetch(`/social-accounts/${account.id}`, {
+        method: "PATCH",
+        body: JSON.stringify({ proxy_pool_id: nextPoolId || null }),
+      });
+      if (!res.ok) throw new Error(await res.text());
+      await loadAccounts();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "更新失败");
     }
   }
 
@@ -193,6 +214,18 @@ export default function SocialAccountsPage() {
           placeholder="display_name（可选）"
           style={{ padding: 10, borderRadius: 8, border: "1px solid #333", minWidth: 220 }}
         />
+        <select
+          value={proxyPoolId}
+          onChange={(e) => setProxyPoolId(e.target.value)}
+          style={{ padding: 10, borderRadius: 8, border: "1px solid #333", minWidth: 260 }}
+        >
+          <option value="">代理池（可选）</option>
+          {proxyPools.map((p) => (
+            <option key={p.id} value={p.id}>
+              {p.name} ({p.strategy})
+            </option>
+          ))}
+        </select>
         <button
           type="submit"
           style={{ padding: "10px 14px", borderRadius: 10, border: "none", background: "#2f6fed", color: "white" }}
@@ -207,12 +240,35 @@ export default function SocialAccountsPage() {
       <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
         {accounts.map((a) => {
           const s = sessions[a.id];
+          const poolLabel =
+            a.proxy_pool_id && proxyPools.find((p) => p.id === a.proxy_pool_id)
+              ? `${proxyPools.find((p) => p.id === a.proxy_pool_id)?.name} (${proxyPools.find((p) => p.id === a.proxy_pool_id)?.strategy})`
+              : a.proxy_pool_id
+                ? a.proxy_pool_id
+                : "—";
           return (
             <div key={a.id} style={{ border: "1px solid #222", borderRadius: 12, padding: 14 }}>
               <div style={{ display: "flex", gap: 12, alignItems: "center", flexWrap: "wrap" }}>
                 <div style={{ fontWeight: 700 }}>{a.platform_key}</div>
                 <div style={{ opacity: 0.8 }}>{a.handle || a.display_name || "—"}</div>
                 <div style={{ marginLeft: "auto", opacity: 0.7 }}>状态：{a.status}</div>
+              </div>
+
+              <div style={{ marginTop: 10, display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center" }}>
+                <div style={{ opacity: 0.7, fontSize: 13 }}>代理池：</div>
+                <select
+                  value={a.proxy_pool_id || ""}
+                  onChange={(e) => updateAccountProxyPool(a, e.target.value)}
+                  style={{ padding: "8px 12px", borderRadius: 10, border: "1px solid #333", background: "transparent" }}
+                >
+                  <option value="">不使用代理</option>
+                  {proxyPools.map((p) => (
+                    <option key={p.id} value={p.id}>
+                      {p.name} ({p.strategy})
+                    </option>
+                  ))}
+                </select>
+                <div style={{ opacity: 0.6, fontSize: 12 }}>当前：{poolLabel}</div>
               </div>
 
               <div style={{ marginTop: 10, display: "flex", gap: 10, flexWrap: "wrap" }}>

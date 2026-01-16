@@ -26,6 +26,12 @@ class SocialAccount(Base):
     status: Mapped[str] = mapped_column(String(32), nullable=False, default="needs_login")
     labels: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
     fingerprint_profile: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    proxy_pool_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid(),
+        ForeignKey("proxy_pools.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
 
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(

@@ -29,6 +29,8 @@ class AccountRunPublic(BaseModel):
     error_code: str | None
     started_at: datetime | None
     finished_at: datetime | None
+    retry_count: int
+    next_retry_at: datetime | None
 
 
 class RunDetail(BaseModel):

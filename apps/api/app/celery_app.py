@@ -13,6 +13,10 @@ celery_app.conf.beat_schedule = {
         "task": "syncsocial.tick_schedules",
         "schedule": 30.0,
     },
+    "syncsocial-tick-retries": {
+        "task": "syncsocial.tick_retries",
+        "schedule": 30.0,
+    },
     "syncsocial-cleanup-artifacts": {
         "task": "syncsocial.cleanup_artifacts",
         "schedule": 6 * 60 * 60.0,

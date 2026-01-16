@@ -4,6 +4,7 @@
 docs/
 oldcode/
 secrets/
+public/
 
 # Env / secrets
 .env

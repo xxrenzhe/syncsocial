@@ -3,8 +3,9 @@ from __future__ import annotations
 import base64
 import random
 import re
+import tempfile
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Literal
 
 from playwright.sync_api import Error as PlaywrightError
@@ -14,6 +15,8 @@ from playwright.sync_api import sync_playwright
 
 ActionStatus = Literal["succeeded", "failed", "skipped"]
 BandwidthMode = Literal["eco", "balanced", "full"]
+_MAX_DOM_HTML_CHARS = 200_000
+_MAX_TRACE_BYTES = 3_000_000
 
 
 @dataclass(frozen=True)
@@ -23,7 +26,8 @@ class ExecuteActionResult:
     message: str | None
     current_url: str | None
     screenshot_base64: str | None
-    metadata: dict[str, Any]
+    trace_base64: str | None = None
+    metadata: dict[str, Any] = field(default_factory=dict)
 
 
 def execute_action(
@@ -36,6 +40,7 @@ def execute_action(
     bandwidth_mode: BandwidthMode | None,
     action_params: dict[str, Any] | None,
     fingerprint_profile: dict[str, Any] | None,
+    proxy: dict[str, Any] | None,
     headless: bool,
 ) -> ExecuteActionResult:
     platform = platform_key.strip().lower()
@@ -48,40 +53,67 @@ def execute_action(
             message=f"Unsupported platform: {platform_key}",
             current_url=None,
             screenshot_base64=None,
+            trace_base64=None,
             metadata={},
         )
 
     try:
         with sync_playwright() as pw:
-            browser = pw.chromium.launch(headless=headless)
+            launch_kwargs: dict[str, Any] = {"headless": headless}
+            normalized_proxy = _normalize_proxy(proxy or {})
+            if normalized_proxy:
+                launch_kwargs["proxy"] = normalized_proxy
+            browser = pw.chromium.launch(**launch_kwargs)
             context_kwargs = {"storage_state": storage_state, **_context_kwargs_from_fingerprint(fingerprint_profile or {})}
             context = browser.new_context(**context_kwargs)
             _install_bandwidth_mode(context, bandwidth_mode)
+            trace = _start_trace(context)
             page = context.new_page()
             page.set_default_timeout(15_000)
             page.set_default_navigation_timeout(30_000)
 
             try:
+                res: ExecuteActionResult
                 if action in {"health_check", "x_health_check"}:
-                    return _x_health_check(page)
-                if action in {"x_like", "like"}:
-                    return _x_like(page, target_url=target_url, tweet_id=target_external_id)
-                if action in {"x_repost", "x_retweet", "retweet", "repost"}:
-                    return _x_repost(page, target_url=target_url, tweet_id=target_external_id)
-                if action in {"x_search_collect", "search_collect"}:
-                    return _x_search_collect(page, search_url=target_url, params=action_params or {})
-                if action in {"x_reply", "reply", "comment", "x_comment"}:
-                    return _x_reply(page, target_url=target_url, tweet_id=target_external_id, params=action_params or {})
-                if action in {"x_quote", "quote"}:
-                    return _x_quote(page, target_url=target_url, tweet_id=target_external_id, params=action_params or {})
-                return ExecuteActionResult(
-                    status="failed",
-                    error_code="UNSUPPORTED_ACTION",
-                    message=f"Unsupported action_type: {action_type}",
-                    current_url=None,
-                    screenshot_base64=None,
-                    metadata={},
-                )
+                    res = _x_health_check(page)
+                elif action in {"proxy_check", "x_proxy_check"}:
+                    res = _x_proxy_check(page)
+                elif action in {"x_like", "like"}:
+                    res = _x_like(page, target_url=target_url, tweet_id=target_external_id)
+                elif action in {"x_repost", "x_retweet", "retweet", "repost"}:
+                    res = _x_repost(page, target_url=target_url, tweet_id=target_external_id)
+                elif action in {"x_search_collect", "search_collect"}:
+                    res = _x_search_collect(page, search_url=target_url, params=action_params or {})
+                elif action in {"x_reply", "reply", "comment", "x_comment"}:
+                    res = _x_reply(page, target_url=target_url, tweet_id=target_external_id, params=action_params or {})
+                elif action in {"x_quote", "quote"}:
+                    res = _x_quote(page, target_url=target_url, tweet_id=target_external_id, params=action_params or {})
+                else:
+                    res = ExecuteActionResult(
+                        status="failed",
+                        error_code="UNSUPPORTED_ACTION",
+                        message=f"Unsupported action_type: {action_type}",
+                        current_url=str(getattr(page, "url", "")) or None,
+                        screenshot_base64=_safe_screenshot(page),
+                        trace_base64=None,
+                        metadata=_failure_metadata(page),
+                    )
+                res = _enrich_failure_result(res, page)
+                if res.status == "failed" and trace:
+                    trace_base64 = _stop_trace_to_base64(trace, context)
+                    if trace_base64:
+                        res = ExecuteActionResult(
+                            status=res.status,
+                            error_code=res.error_code,
+                            message=res.message,
+                            current_url=res.current_url,
+                            screenshot_base64=res.screenshot_base64,
+                            trace_base64=trace_base64,
+                            metadata=res.metadata,
+                        )
+                elif trace:
+                    _stop_trace(trace, context)
+                return res
             finally:
                 try:
                     context.close()
@@ -94,15 +126,18 @@ def execute_action(
             message="Playwright timeout",
             current_url=None,
             screenshot_base64=None,
+            trace_base64=None,
             metadata={},
         )
     except PlaywrightError as exc:
+        code = _classify_playwright_error(exc)
         return ExecuteActionResult(
             status="failed",
-            error_code="BROWSER_ERROR",
+            error_code=code,
             message=str(exc),
             current_url=None,
             screenshot_base64=None,
+            trace_base64=None,
             metadata={},
         )
     except Exception as exc:
@@ -112,6 +147,7 @@ def execute_action(
             message=str(exc),
             current_url=None,
             screenshot_base64=None,
+            trace_base64=None,
             metadata={},
         )
 
@@ -123,6 +159,7 @@ def execute_actions_batch(
     storage_state: dict[str, Any],
     bandwidth_mode: BandwidthMode | None,
     fingerprint_profile: dict[str, Any] | None,
+    proxy: dict[str, Any] | None,
     headless: bool,
 ) -> list[ExecuteActionResult]:
     platform = platform_key.strip().lower()
@@ -134,6 +171,7 @@ def execute_actions_batch(
                 message=f"Unsupported platform: {platform_key}",
                 current_url=None,
                 screenshot_base64=None,
+                trace_base64=None,
                 metadata={},
             )
             for _ in actions
@@ -141,10 +179,15 @@ def execute_actions_batch(
 
     try:
         with sync_playwright() as pw:
-            browser = pw.chromium.launch(headless=headless)
+            launch_kwargs: dict[str, Any] = {"headless": headless}
+            normalized_proxy = _normalize_proxy(proxy or {})
+            if normalized_proxy:
+                launch_kwargs["proxy"] = normalized_proxy
+            browser = pw.chromium.launch(**launch_kwargs)
             context_kwargs = {"storage_state": storage_state, **_context_kwargs_from_fingerprint(fingerprint_profile or {})}
             context = browser.new_context(**context_kwargs)
             _install_bandwidth_mode(context, bandwidth_mode)
+            trace = _start_trace(context)
             page = context.new_page()
             page.set_default_timeout(15_000)
             page.set_default_navigation_timeout(30_000)
@@ -160,6 +203,7 @@ def execute_actions_batch(
                             message="Previous action failed",
                             current_url=str(getattr(page, "url", "")) or None,
                             screenshot_base64=None,
+                            trace_base64=None,
                             metadata={},
                         )
                     )
@@ -184,15 +228,18 @@ def execute_actions_batch(
                         message="Playwright timeout",
                         current_url=str(getattr(page, "url", "")) or None,
                         screenshot_base64=_safe_screenshot(page),
+                        trace_base64=None,
                         metadata={},
                     )
                 except PlaywrightError as exc:
+                    code = _classify_playwright_error(exc)
                     res = ExecuteActionResult(
                         status="failed",
-                        error_code="BROWSER_ERROR",
+                        error_code=code,
                         message=str(exc),
                         current_url=str(getattr(page, "url", "")) or None,
                         screenshot_base64=_safe_screenshot(page),
+                        trace_base64=None,
                         metadata={},
                     )
                 except Exception as exc:
@@ -202,19 +249,51 @@ def execute_actions_batch(
                         message=str(exc),
                         current_url=str(getattr(page, "url", "")) or None,
                         screenshot_base64=_safe_screenshot(page),
+                        trace_base64=None,
                         metadata={},
                     )
 
-                results.append(res)
+                res = _enrich_failure_result(res, page)
                 if res.status == "failed":
+                    if trace:
+                        trace_base64 = _stop_trace_to_base64(trace, context)
+                        if trace_base64:
+                            res = ExecuteActionResult(
+                                status=res.status,
+                                error_code=res.error_code,
+                                message=res.message,
+                                current_url=res.current_url,
+                                screenshot_base64=res.screenshot_base64,
+                                trace_base64=trace_base64,
+                                metadata=res.metadata,
+                            )
                     aborted = True
+                    trace = None
+
+                results.append(res)
 
             try:
+                if trace:
+                    _stop_trace(trace, context)
                 context.close()
             finally:
                 browser.close()
 
             return results
+    except PlaywrightError as exc:
+        code = _classify_playwright_error(exc)
+        return [
+            ExecuteActionResult(
+                status="failed",
+                error_code=code,
+                message=str(exc),
+                current_url=None,
+                screenshot_base64=None,
+                trace_base64=None,
+                metadata={},
+            )
+            for _ in actions
+        ]
     except Exception as exc:
         return [
             ExecuteActionResult(
@@ -223,6 +302,7 @@ def execute_actions_batch(
                 message=str(exc),
                 current_url=None,
                 screenshot_base64=None,
+                trace_base64=None,
                 metadata={},
             )
             for _ in actions
@@ -301,6 +381,38 @@ def _context_kwargs_from_fingerprint(profile: dict[str, Any]) -> dict[str, Any]:
     return kwargs
 
 
+def _normalize_proxy(value: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(value, dict) or not value:
+        return {}
+    server = value.get("server")
+    if not isinstance(server, str) or not server.strip():
+        return {}
+    payload: dict[str, Any] = {"server": server.strip()}
+    username = value.get("username")
+    if isinstance(username, str) and username.strip():
+        payload["username"] = username.strip()
+    password = value.get("password")
+    if isinstance(password, str) and password.strip():
+        payload["password"] = password.strip()
+    return payload
+
+
+def _classify_playwright_error(exc: PlaywrightError) -> str:
+    msg = str(exc)
+    lowered = msg.lower()
+    for token in [
+        "err_proxy_connection_failed",
+        "proxy",
+        "tunnel connection failed",
+        "socks",
+        "407",
+        "proxy authentication required",
+    ]:
+        if token in lowered:
+            return "PROXY_FAILED"
+    return "BROWSER_ERROR"
+
+
 def _execute_action_on_page(
     page: Any,
     *,
@@ -312,6 +424,8 @@ def _execute_action_on_page(
     action = str(action_type).strip().lower()
     if action in {"health_check", "x_health_check"}:
         return _x_health_check(page)
+    if action in {"proxy_check", "x_proxy_check"}:
+        return _x_proxy_check(page)
     if action in {"x_like", "like"}:
         return _x_like(page, target_url=target_url, tweet_id=target_external_id)
     if action in {"x_repost", "x_retweet", "retweet", "repost"}:
@@ -328,6 +442,7 @@ def _execute_action_on_page(
         message=f"Unsupported action_type: {action_type}",
         current_url=str(getattr(page, "url", "")) or None,
         screenshot_base64=_safe_screenshot(page),
+        trace_base64=None,
         metadata={},
     )
 
@@ -357,6 +472,7 @@ def _x_search_collect(page: Any, *, search_url: str | None, params: dict[str, An
             message="Risk challenge detected",
             current_url=str(page.url),
             screenshot_base64=screenshot,
+            trace_base64=None,
             metadata={"risk": risk},
         )
     if not _x_is_logged_in(page):
@@ -367,6 +483,7 @@ def _x_search_collect(page: Any, *, search_url: str | None, params: dict[str, An
             message="Not logged in",
             current_url=str(page.url),
             screenshot_base64=screenshot,
+            trace_base64=None,
             metadata={"logged_in": False},
         )
 
@@ -374,13 +491,24 @@ def _x_search_collect(page: Any, *, search_url: str | None, params: dict[str, An
         page.wait_for_selector("article", timeout=10_000)
     except PlaywrightTimeoutError:
         screenshot = _safe_screenshot(page)
+        if _x_has_no_search_results(page):
+            return ExecuteActionResult(
+                status="skipped",
+                error_code=None,
+                message="No search results",
+                current_url=str(page.url),
+                screenshot_base64=screenshot,
+                trace_base64=None,
+                metadata={"candidates": [], "collected": 0},
+            )
         return ExecuteActionResult(
-            status="skipped",
-            error_code=None,
-            message="No search results",
+            status="failed",
+            error_code="UI_SELECTOR_CHANGED",
+            message="Search results not found (article selector missing)",
             current_url=str(page.url),
             screenshot_base64=screenshot,
-            metadata={"candidates": [], "collected": 0},
+            trace_base64=None,
+            metadata={},
         )
 
     candidates_by_id: dict[str, dict[str, Any]] = {}
@@ -429,6 +557,7 @@ def _x_search_collect(page: Any, *, search_url: str | None, params: dict[str, An
             message="No candidates found",
             current_url=str(page.url),
             screenshot_base64=None,
+            trace_base64=None,
             metadata={"candidates": [], "collected": 0},
         )
 
@@ -438,6 +567,7 @@ def _x_search_collect(page: Any, *, search_url: str | None, params: dict[str, An
         message=None,
         current_url=str(page.url),
         screenshot_base64=None,
+        trace_base64=None,
         metadata={"candidates": candidates, "collected": len(candidates)},
     )
 
@@ -482,6 +612,7 @@ def _x_health_check(page: Any) -> ExecuteActionResult:
             message="Risk challenge detected",
             current_url=str(page.url),
             screenshot_base64=screenshot,
+            trace_base64=None,
             metadata={"risk": risk},
         )
     logged_in = _x_is_logged_in(page)
@@ -492,6 +623,7 @@ def _x_health_check(page: Any) -> ExecuteActionResult:
             message=None,
             current_url=str(page.url),
             screenshot_base64=None,
+            trace_base64=None,
             metadata={"logged_in": True},
         )
 
@@ -502,7 +634,33 @@ def _x_health_check(page: Any) -> ExecuteActionResult:
         message="Not logged in",
         current_url=str(page.url),
         screenshot_base64=screenshot,
+        trace_base64=None,
         metadata={"logged_in": False},
+    )
+
+
+def _x_proxy_check(page: Any) -> ExecuteActionResult:
+    page.goto("https://x.com", wait_until="domcontentloaded")
+    risk = _x_detect_risk(page)
+    if risk is not None:
+        screenshot = _safe_screenshot(page)
+        return ExecuteActionResult(
+            status="failed",
+            error_code=risk,
+            message="Risk challenge detected",
+            current_url=str(page.url),
+            screenshot_base64=screenshot,
+            trace_base64=None,
+            metadata={"risk": risk},
+        )
+    return ExecuteActionResult(
+        status="succeeded",
+        error_code=None,
+        message=None,
+        current_url=str(page.url),
+        screenshot_base64=None,
+        trace_base64=None,
+        metadata={},
     )
 
 
@@ -531,6 +689,18 @@ def _x_is_logged_in(page: Any) -> bool:
         except Exception:
             continue
     return False
+
+
+def _x_has_no_search_results(page: Any) -> bool:
+    try:
+        return (
+            page.locator(
+                "text=/No results for|Try searching for|Nothing to see here|We didn't find any matches/i"
+            ).count()
+            > 0
+        )
+    except Exception:
+        return False
 
 
 def _x_detect_risk(page: Any) -> str | None:
@@ -576,6 +746,7 @@ def _x_like(page: Any, *, target_url: str | None, tweet_id: str | None) -> Execu
             message="target_url is required for x_like",
             current_url=None,
             screenshot_base64=None,
+            trace_base64=None,
             metadata={},
         )
 
@@ -590,6 +761,7 @@ def _x_like(page: Any, *, target_url: str | None, tweet_id: str | None) -> Execu
             message="Risk challenge detected",
             current_url=str(page.url),
             screenshot_base64=screenshot,
+            trace_base64=None,
             metadata={"risk": risk},
         )
 
@@ -601,6 +773,7 @@ def _x_like(page: Any, *, target_url: str | None, tweet_id: str | None) -> Execu
             message="Not logged in",
             current_url=str(page.url),
             screenshot_base64=screenshot,
+            trace_base64=None,
             metadata={"logged_in": False},
         )
 
@@ -618,6 +791,7 @@ def _x_like(page: Any, *, target_url: str | None, tweet_id: str | None) -> Execu
             message="Tweet article not found",
             current_url=str(page.url),
             screenshot_base64=screenshot,
+            trace_base64=None,
             metadata={},
         )
 
@@ -628,6 +802,7 @@ def _x_like(page: Any, *, target_url: str | None, tweet_id: str | None) -> Execu
             message="Already liked",
             current_url=str(page.url),
             screenshot_base64=None,
+            trace_base64=None,
             metadata={"already_liked": True},
         )
 
@@ -644,6 +819,7 @@ def _x_like(page: Any, *, target_url: str | None, tweet_id: str | None) -> Execu
             message="Like button not clickable",
             current_url=str(page.url),
             screenshot_base64=screenshot,
+            trace_base64=None,
             metadata={},
         )
     except PlaywrightError as exc:
@@ -654,6 +830,7 @@ def _x_like(page: Any, *, target_url: str | None, tweet_id: str | None) -> Execu
             message=str(exc),
             current_url=str(page.url),
             screenshot_base64=screenshot,
+            trace_base64=None,
             metadata={},
         )
 
@@ -665,6 +842,7 @@ def _x_like(page: Any, *, target_url: str | None, tweet_id: str | None) -> Execu
             message=None,
             current_url=str(page.url),
             screenshot_base64=None,
+            trace_base64=None,
             metadata={"already_liked": False},
         )
     except PlaywrightTimeoutError:
@@ -675,6 +853,7 @@ def _x_like(page: Any, *, target_url: str | None, tweet_id: str | None) -> Execu
             message="Like action not confirmed (unlike not visible)",
             current_url=str(page.url),
             screenshot_base64=screenshot,
+            trace_base64=None,
             metadata={"already_liked": False},
         )
 
@@ -687,6 +866,7 @@ def _x_reply(page: Any, *, target_url: str | None, tweet_id: str | None, params:
             message="target_url is required for x_reply",
             current_url=None,
             screenshot_base64=None,
+            trace_base64=None,
             metadata={},
         )
 
@@ -698,6 +878,7 @@ def _x_reply(page: Any, *, target_url: str | None, tweet_id: str | None, params:
             message="action_params.text is required for x_reply",
             current_url=None,
             screenshot_base64=None,
+            trace_base64=None,
             metadata={},
         )
 
@@ -712,6 +893,7 @@ def _x_reply(page: Any, *, target_url: str | None, tweet_id: str | None, params:
             message="Risk challenge detected",
             current_url=str(page.url),
             screenshot_base64=screenshot,
+            trace_base64=None,
             metadata={"risk": risk},
         )
 
@@ -723,6 +905,7 @@ def _x_reply(page: Any, *, target_url: str | None, tweet_id: str | None, params:
             message="Not logged in",
             current_url=str(page.url),
             screenshot_base64=screenshot,
+            trace_base64=None,
             metadata={"logged_in": False},
         )
 
@@ -740,6 +923,7 @@ def _x_reply(page: Any, *, target_url: str | None, tweet_id: str | None, params:
             message="Tweet article not found",
             current_url=str(page.url),
             screenshot_base64=screenshot,
+            trace_base64=None,
             metadata={},
         )
 
@@ -757,6 +941,7 @@ def _x_reply(page: Any, *, target_url: str | None, tweet_id: str | None, params:
             message="Reply button not clickable",
             current_url=str(page.url),
             screenshot_base64=screenshot,
+            trace_base64=None,
             metadata={},
         )
     except PlaywrightError as exc:
@@ -767,6 +952,7 @@ def _x_reply(page: Any, *, target_url: str | None, tweet_id: str | None, params:
             message=str(exc),
             current_url=str(page.url),
             screenshot_base64=screenshot,
+            trace_base64=None,
             metadata={},
         )
 
@@ -778,6 +964,7 @@ def _x_reply(page: Any, *, target_url: str | None, tweet_id: str | None, params:
             message="Reply restricted by author",
             current_url=str(page.url),
             screenshot_base64=None,
+            trace_base64=None,
             metadata={},
         )
 
@@ -1251,5 +1438,103 @@ def _safe_screenshot(page: Any) -> str | None:
     try:
         png = page.screenshot(type="png", full_page=False)
         return base64.b64encode(png).decode("ascii")
+    except Exception:
+        return None
+
+
+def _safe_dom_html(page: Any) -> str | None:
+    try:
+        html = page.content()
+    except Exception:
+        return None
+    if not isinstance(html, str) or not html:
+        return None
+    if len(html) > _MAX_DOM_HTML_CHARS:
+        return html[:_MAX_DOM_HTML_CHARS]
+    return html
+
+
+def _failure_metadata(page: Any, extra: dict[str, Any] | None = None) -> dict[str, Any]:
+    payload: dict[str, Any] = {}
+    if isinstance(extra, dict) and extra:
+        payload.update(extra)
+    dom_html = _safe_dom_html(page)
+    if dom_html:
+        payload["dom_html"] = dom_html
+    return payload
+
+
+def _enrich_failure_result(result: ExecuteActionResult, page: Any) -> ExecuteActionResult:
+    if result.status != "failed":
+        return result
+    if result.metadata and "dom_html" in result.metadata:
+        return result
+    metadata = dict(result.metadata or {})
+    dom_html = _safe_dom_html(page)
+    if dom_html:
+        metadata["dom_html"] = dom_html
+    if metadata == (result.metadata or {}):
+        return result
+    return ExecuteActionResult(
+        status=result.status,
+        error_code=result.error_code,
+        message=result.message,
+        current_url=result.current_url,
+        screenshot_base64=result.screenshot_base64,
+        trace_base64=result.trace_base64,
+        metadata=metadata,
+    )
+
+
+def _start_trace(context: Any) -> bool:
+    try:
+        context.tracing.start(screenshots=True, snapshots=True, sources=False)
+        return True
+    except Exception:
+        return False
+
+
+def _stop_trace(_: bool, context: Any) -> None:
+    try:
+        context.tracing.stop()
+    except Exception:
+        return
+
+
+def _stop_trace_to_base64(_: bool, context: Any) -> str | None:
+    try:
+        tmp = tempfile.NamedTemporaryFile(prefix="trace-", suffix=".zip", delete=False)
+        path = tmp.name
+        tmp.close()
+    except Exception:
+        path = None
+
+    if not path:
+        try:
+            context.tracing.stop()
+        except Exception:
+            pass
+        return None
+
+    try:
+        context.tracing.stop(path=path)
+        with open(path, "rb") as f:
+            payload = f.read()
+    except Exception:
+        return None
+    finally:
+        try:
+            import os
+
+            os.unlink(path)
+        except Exception:
+            pass
+
+    if not payload:
+        return None
+    if len(payload) > _MAX_TRACE_BYTES:
+        return None
+    try:
+        return base64.b64encode(payload).decode("ascii")
     except Exception:
         return None

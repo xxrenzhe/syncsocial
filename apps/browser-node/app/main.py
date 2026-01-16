@@ -22,6 +22,7 @@ class CreateLoginSessionRequest(BaseModel):
     login_session_id: uuid.UUID
     platform_key: str = Field(min_length=1, max_length=32)
     fingerprint_profile: dict = Field(default_factory=dict)
+    proxy: dict = Field(default_factory=dict)
 
 
 class CreateLoginSessionResponse(BaseModel):
@@ -37,6 +38,7 @@ class ExecuteActionRequest(BaseModel):
     bandwidth_mode: str | None = Field(default=None, max_length=16)
     action_params: dict = Field(default_factory=dict)
     fingerprint_profile: dict = Field(default_factory=dict)
+    proxy: dict = Field(default_factory=dict)
 
 
 class ExecuteActionResponse(BaseModel):
@@ -45,6 +47,7 @@ class ExecuteActionResponse(BaseModel):
     message: str | None = None
     current_url: str | None = None
     screenshot_base64: str | None = None
+    trace_base64: str | None = None
     metadata: dict = Field(default_factory=dict)
 
 
@@ -60,6 +63,7 @@ class ExecuteActionsBatchRequest(BaseModel):
     storage_state: dict
     bandwidth_mode: str | None = Field(default=None, max_length=16)
     fingerprint_profile: dict = Field(default_factory=dict)
+    proxy: dict = Field(default_factory=dict)
     actions: list[ExecuteActionBatchItem] = Field(default_factory=list)
 
 
@@ -79,6 +83,7 @@ def create_login_session(payload: CreateLoginSessionRequest, _: None = Depends(r
             login_session_id=payload.login_session_id,
             platform_key=payload.platform_key,
             fingerprint_profile=payload.fingerprint_profile,
+            proxy=payload.proxy,
         )
     except KeyError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
@@ -119,6 +124,7 @@ def execute_action_endpoint(payload: ExecuteActionRequest, _: None = Depends(req
         bandwidth_mode=payload.bandwidth_mode if payload.bandwidth_mode else None,
         action_params=payload.action_params,
         fingerprint_profile=payload.fingerprint_profile,
+        proxy=payload.proxy,
         headless=settings.headless,
     )
     return ExecuteActionResponse(
@@ -127,6 +133,7 @@ def execute_action_endpoint(payload: ExecuteActionRequest, _: None = Depends(req
         message=result.message,
         current_url=result.current_url,
         screenshot_base64=result.screenshot_base64,
+        trace_base64=result.trace_base64,
         metadata=result.metadata,
     )
 
@@ -141,6 +148,7 @@ def execute_actions_batch_endpoint(
         storage_state=payload.storage_state,
         bandwidth_mode=payload.bandwidth_mode if payload.bandwidth_mode else None,
         fingerprint_profile=payload.fingerprint_profile,
+        proxy=payload.proxy,
         headless=settings.headless,
     )
     return ExecuteActionsBatchResponse(
@@ -151,6 +159,7 @@ def execute_actions_batch_endpoint(
                 message=item.message,
                 current_url=item.current_url,
                 screenshot_base64=item.screenshot_base64,
+                trace_base64=item.trace_base64,
                 metadata=item.metadata,
             )
             for item in results

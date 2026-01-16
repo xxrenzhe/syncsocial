@@ -12,6 +12,8 @@ from app.models.strategy import Strategy
 from app.models.subscription import WorkspaceSubscription, WorkspaceUsageMonthly
 from app.models.user import User
 from app.models.workspace import Workspace
+from app.models.proxy_pool import ProxyPool
+from app.models.proxy import Proxy
 
 __all__ = [
     "AccountRun",
@@ -29,4 +31,6 @@ __all__ = [
     "WorkspaceUsageMonthly",
     "User",
     "Workspace",
+    "ProxyPool",
+    "Proxy",
 ]

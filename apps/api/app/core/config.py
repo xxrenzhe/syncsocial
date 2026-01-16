@@ -45,6 +45,10 @@ class Settings(BaseSettings):
     redis_url: str = Field(default="redis://localhost:6379/0", alias="REDIS_URL")
     celery_task_always_eager: bool = Field(default=False, alias="CELERY_TASK_ALWAYS_EAGER")
 
+    account_run_max_retries: int = Field(default=3, alias="ACCOUNT_RUN_MAX_RETRIES")
+    account_run_retry_base_seconds: int = Field(default=30, alias="ACCOUNT_RUN_RETRY_BASE_SECONDS")
+    account_run_retry_max_seconds: int = Field(default=30 * 60, alias="ACCOUNT_RUN_RETRY_MAX_SECONDS")
+
     def normalized_cors_origins(self) -> list[str]:
         value: Any = self.cors_origins
         if isinstance(value, str):

@@ -12,6 +12,7 @@ from app.api.routes import (
     schedules,
     social_accounts,
     strategies,
+    proxies,
 )
 
 api_router = APIRouter()
@@ -22,6 +23,7 @@ api_router.include_router(login_sessions.router, prefix="/login-sessions", tags=
 api_router.include_router(strategies.router, prefix="/strategies", tags=["strategies"])
 api_router.include_router(schedules.router, prefix="/schedules", tags=["schedules"])
 api_router.include_router(runs.router, prefix="/runs", tags=["runs"])
+api_router.include_router(proxies.router, tags=["proxies"])
 api_router.include_router(artifacts.router, tags=["artifacts"])
 api_router.include_router(admin_users.router, prefix="/admin", tags=["admin"])
 api_router.include_router(admin_subscription.router, prefix="/admin", tags=["admin"])

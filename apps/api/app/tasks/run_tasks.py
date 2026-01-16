@@ -8,7 +8,7 @@ import urllib.parse
 from datetime import date, timedelta
 from pathlib import Path
 
-from sqlalchemy import select
+from sqlalchemy import or_, select, update
 
 from app.celery_app import celery_app
 from app.core.config import settings
@@ -22,10 +22,12 @@ from app.models.run import Run
 from app.models.social_account import SocialAccount
 from app.models.strategy import Strategy
 from app.services.browser_cluster import browser_cluster
+from app.services.proxy_selection import select_proxy_for_account_with_id
 from app.services.subscription import increment_automation_runtime_seconds
 from app.utils.time import utc_now
 
 _TWEET_ID_RE = re.compile(r"/status/(?P<tweet_id>\\d+)")
+_RETRYABLE_ACCOUNT_RUN_ERRORS = {"PROXY_FAILED", "BROWSER_NODE_ERROR", "BROWSER_ERROR"}
 
 
 @celery_app.task(name="syncsocial.execute_account_run")
@@ -34,24 +36,36 @@ def execute_account_run(account_run_id: str) -> None:
     now = utc_now()
 
     with SessionLocal() as db:
+        claim = (
+            update(AccountRun)
+            .where(AccountRun.id == account_run_uuid)
+            .where(AccountRun.status.in_(["queued", "retry_waiting"]))
+            .where(or_(AccountRun.next_retry_at.is_(None), AccountRun.next_retry_at <= now))
+            .values(status="running", started_at=now, finished_at=None, error_code=None)
+        )
+        claimed = db.execute(claim)
+        if not claimed.rowcount:
+            return
+        db.commit()
+
         account_run = db.get(AccountRun, account_run_uuid)
         if account_run is None:
-            return
-        if account_run.status not in {"queued", "retry_waiting"}:
             return
 
         run = db.get(Run, account_run.run_id)
         if run is None:
+            account_run.status = "failed"
+            account_run.error_code = "RUN_NOT_FOUND"
+            account_run.finished_at = utc_now()
+            account_run.next_retry_at = None
+            db.add(account_run)
+            db.commit()
             return
 
         strategy = db.get(Strategy, run.strategy_id)
         if strategy is None:
             _fail_account_run(db, account_run, run, error_code="STRATEGY_NOT_FOUND")
             return
-
-        account_run.status = "running"
-        account_run.started_at = now
-        db.add(account_run)
 
         if run.status == "queued":
             run.status = "running"
@@ -109,13 +123,15 @@ def execute_account_run(account_run_id: str) -> None:
                 specs=search_specs,
             )
             if error_code is not None:
-                _fail_account_run(db, account_run, run, error_code=error_code)
+                if not _retry_or_fail_account_run(db, account_run, run, error_code=error_code):
+                    _fail_account_run(db, account_run, run, error_code=error_code)
                 return
 
             candidates = _extract_candidates(executed_actions, results)
             if not candidates:
                 account_run.status = "succeeded"
                 account_run.finished_at = utc_now()
+                account_run.next_retry_at = None
                 db.add(account_run)
                 db.commit()
                 _finalize_run_if_done(db, run.id)
@@ -137,7 +153,8 @@ def execute_account_run(account_run_id: str) -> None:
                 specs=action_specs,
             )
             if action_error is not None:
-                _fail_account_run(db, account_run, run, error_code=action_error)
+                if not _retry_or_fail_account_run(db, account_run, run, error_code=action_error):
+                    _fail_account_run(db, account_run, run, error_code=action_error)
                 return
         else:
             action_specs = _build_action_specs(strategy, account_run=account_run, account=account)
@@ -151,11 +168,13 @@ def execute_account_run(account_run_id: str) -> None:
                 specs=action_specs,
             )
             if error_code is not None:
-                _fail_account_run(db, account_run, run, error_code=error_code)
+                if not _retry_or_fail_account_run(db, account_run, run, error_code=error_code):
+                    _fail_account_run(db, account_run, run, error_code=error_code)
                 return
 
         account_run.status = "succeeded"
         account_run.finished_at = utc_now()
+        account_run.next_retry_at = None
         db.add(account_run)
         increment_automation_runtime_seconds(
             db,
@@ -168,10 +187,58 @@ def execute_account_run(account_run_id: str) -> None:
         _finalize_run_if_done(db, run.id)
 
 
+def _retry_or_fail_account_run(db, account_run: AccountRun, run: Run, *, error_code: str) -> bool:
+    code = str(error_code or "").strip()
+    if not code or code not in _RETRYABLE_ACCOUNT_RUN_ERRORS:
+        return False
+
+    max_retries = max(0, int(getattr(settings, "account_run_max_retries", 3) or 0))
+    retry_count = int(getattr(account_run, "retry_count", 0) or 0)
+    if retry_count >= max_retries:
+        return False
+
+    base = max(1, int(getattr(settings, "account_run_retry_base_seconds", 30) or 30))
+    cap = max(base, int(getattr(settings, "account_run_retry_max_seconds", 30 * 60) or 30 * 60))
+    delay = min(cap, base * (2**retry_count))
+    delay = int(delay * random.uniform(0.85, 1.15))
+    if delay < 1:
+        delay = 1
+
+    now = utc_now()
+    account_run.status = "retry_waiting"
+    account_run.error_code = code
+    account_run.finished_at = now
+    account_run.next_retry_at = now + timedelta(seconds=delay)
+    account_run.retry_count = retry_count + 1
+    db.add(account_run)
+
+    increment_automation_runtime_seconds(
+        db,
+        workspace_id=account_run.workspace_id,
+        started_at=account_run.started_at,
+        finished_at=account_run.finished_at,
+    )
+    if run.status == "queued":
+        run.status = "running"
+        run.started_at = now
+        db.add(run)
+    db.commit()
+
+    if not settings.celery_task_always_eager:
+        try:
+            celery_app.send_task("syncsocial.execute_account_run", args=[str(account_run.id)], countdown=delay)
+        except Exception:
+            pass
+
+    _finalize_run_if_done(db, run.id)
+    return True
+
+
 def _fail_account_run(db, account_run: AccountRun, run: Run, *, error_code: str) -> None:
     account_run.status = "failed"
     account_run.error_code = error_code
     account_run.finished_at = utc_now()
+    account_run.next_retry_at = None
     db.add(account_run)
     increment_automation_runtime_seconds(
         db,
@@ -293,6 +360,8 @@ def _execute_specs(
     actions_to_execute: list[Action] = []
     execute_payload: list[dict] = []
     bandwidth_mode = None
+    selected_proxy = None
+    selected_proxy_id = None
 
     for spec in specs:
         action = _create_action(db, account_run=account_run, strategy=strategy, account=account, spec=spec)
@@ -325,14 +394,103 @@ def _execute_specs(
         db.add(action)
     db.commit()
 
+    max_proxy_attempts = 1
+    if getattr(account, "proxy_pool_id", None):
+        max_proxy_attempts = 3
+
+    for attempt in range(max_proxy_attempts):
+        results = None
+        selected_proxy = None
+        selected_proxy_id = None
+        if getattr(account, "proxy_pool_id", None):
+            try:
+                picked = select_proxy_for_account_with_id(
+                    db,
+                    workspace_id=account_run.workspace_id,
+                    account_id=account.id,
+                    pool_id=account.proxy_pool_id,
+                    attempt=attempt,
+                )
+                selected_proxy_id = picked.proxy_id
+                selected_proxy = picked.to_playwright_proxy()
+            except Exception:
+                if attempt == 0:
+                    finished_at = utc_now()
+                    for action in actions_to_execute:
+                        action.status = "failed"
+                        action.error_code = "PROXY_CONFIG_INVALID"
+                        action.finished_at = finished_at
+                        db.add(action)
+                    db.commit()
+                    return actions_to_execute, [], "PROXY_CONFIG_INVALID"
+                continue
+
+        if selected_proxy_id:
+            for action in actions_to_execute:
+                action.metadata_ = {
+                    **(action.metadata_ or {}),
+                    "proxy": {"proxy_id": str(selected_proxy_id), "server": selected_proxy.get("server") if selected_proxy else None},
+                }
+                db.add(action)
+            db.commit()
+
+        try:
+            results = browser_cluster.execute_actions(
+                platform_key=account.platform_key,
+                storage_state=storage_state,
+                actions=execute_payload,
+                bandwidth_mode=bandwidth_mode,
+                fingerprint_profile=getattr(account, "fingerprint_profile", None) or {},
+                proxy=selected_proxy or {},
+            )
+        except Exception as exc:
+            finished_at = utc_now()
+            for action in actions_to_execute:
+                action.status = "failed"
+                action.error_code = "BROWSER_NODE_ERROR"
+                action.metadata_ = {**(action.metadata_ or {}), "message": str(exc)}
+                action.finished_at = finished_at
+                db.add(action)
+            db.commit()
+            return actions_to_execute, [], "BROWSER_NODE_ERROR"
+
+        if not isinstance(results, list) or len(results) != len(actions_to_execute):
+            finished_at = utc_now()
+            for action in actions_to_execute:
+                action.status = "failed"
+                action.error_code = "BROWSER_NODE_ERROR"
+                action.metadata_ = {**(action.metadata_ or {}), "message": "Browser node returned mismatched results"}
+                action.finished_at = finished_at
+                db.add(action)
+            db.commit()
+            return actions_to_execute, results if isinstance(results, list) else [], "BROWSER_NODE_ERROR"
+
+        if (
+            getattr(account, "proxy_pool_id", None)
+            and results
+            and str(results[0].get("status") or "") == "failed"
+            and str(results[0].get("error_code") or "") == "PROXY_FAILED"
+            and attempt < max_proxy_attempts - 1
+            and selected_proxy_id is not None
+        ):
+            from app.models.proxy import Proxy as ProxyModel
+
+            proxy_row = db.get(ProxyModel, selected_proxy_id)
+            if proxy_row is not None and proxy_row.workspace_id == account_run.workspace_id:
+                proxy_row.consecutive_failures = int(proxy_row.consecutive_failures or 0) + 1
+                proxy_row.last_error_code = "PROXY_FAILED"
+                proxy_row.last_checked_at = utc_now()
+                if proxy_row.consecutive_failures >= 3:
+                    proxy_row.enabled = False
+                db.add(proxy_row)
+                db.commit()
+            continue
+
+        break
+
     try:
-        results = browser_cluster.execute_actions(
-            platform_key=account.platform_key,
-            storage_state=storage_state,
-            actions=execute_payload,
-            bandwidth_mode=bandwidth_mode,
-            fingerprint_profile=getattr(account, "fingerprint_profile", None) or {},
-        )
+        if results is None:
+            raise RuntimeError("No results from browser node")
     except Exception as exc:
         finished_at = utc_now()
         for action in actions_to_execute:
@@ -344,17 +502,6 @@ def _execute_specs(
         db.commit()
         return actions_to_execute, [], "BROWSER_NODE_ERROR"
 
-    if len(results) != len(actions_to_execute):
-        finished_at = utc_now()
-        for action in actions_to_execute:
-            action.status = "failed"
-            action.error_code = "BROWSER_NODE_ERROR"
-            action.metadata_ = {**(action.metadata_ or {}), "message": "Browser node returned mismatched results"}
-            action.finished_at = finished_at
-            db.add(action)
-        db.commit()
-        return actions_to_execute, results if isinstance(results, list) else [], "BROWSER_NODE_ERROR"
-
     failures: list[tuple[Action, str | None]] = []
     now_finished = utc_now()
     for action, result in zip(actions_to_execute, results, strict=True):
@@ -363,7 +510,9 @@ def _execute_specs(
         message = str(result.get("message")) if result.get("message") else None
         current_url = str(result.get("current_url")) if result.get("current_url") else None
         screenshot_base64 = str(result.get("screenshot_base64")) if result.get("screenshot_base64") else None
+        trace_base64 = str(result.get("trace_base64")) if result.get("trace_base64") else None
         metadata = result.get("metadata") if isinstance(result.get("metadata"), dict) else {}
+        dom_html = metadata.pop("dom_html", None) if isinstance(metadata, dict) else None
 
         action.error_code = error_code
         action.metadata_ = {
@@ -386,6 +535,16 @@ def _execute_specs(
             if artifact is not None:
                 db.add(artifact)
 
+        if action.status == "failed" and trace_base64:
+            artifact = _store_trace_artifact(action, trace_base64)
+            if artifact is not None:
+                db.add(artifact)
+
+        if action.status == "failed" and isinstance(dom_html, str) and dom_html.strip():
+            artifact = _store_dom_html_artifact(action, dom_html)
+            if artifact is not None:
+                db.add(artifact)
+
         db.add(action)
 
     if any(err == "ACCOUNT_LOCKED" for _, err in failures):
@@ -405,7 +564,32 @@ def _execute_specs(
 
     if failures:
         cause = next((err for _, err in failures if err and err != "ABORTED"), None) or failures[0][1] or "ACTION_FAILED"
+
+        if selected_proxy_id and any(err == "PROXY_FAILED" for _, err in failures):
+            from app.models.proxy import Proxy as ProxyModel
+
+            proxy_row = db.get(ProxyModel, selected_proxy_id)
+            if proxy_row is not None and proxy_row.workspace_id == account_run.workspace_id:
+                proxy_row.consecutive_failures = int(proxy_row.consecutive_failures or 0) + 1
+                proxy_row.last_error_code = "PROXY_FAILED"
+                proxy_row.last_checked_at = utc_now()
+                if proxy_row.consecutive_failures >= 3:
+                    proxy_row.enabled = False
+                db.add(proxy_row)
+                db.commit()
+
         return actions_to_execute, results, cause
+
+    if selected_proxy_id:
+        from app.models.proxy import Proxy as ProxyModel
+
+        proxy_row = db.get(ProxyModel, selected_proxy_id)
+        if proxy_row is not None and proxy_row.workspace_id == account_run.workspace_id:
+            proxy_row.consecutive_failures = 0
+            proxy_row.last_error_code = None
+            proxy_row.last_checked_at = utc_now()
+            db.add(proxy_row)
+            db.commit()
     return actions_to_execute, results, None
 
 
@@ -724,6 +908,58 @@ def _store_screenshot_artifact(action: Action, screenshot_base64: str) -> Artifa
         workspace_id=action.workspace_id,
         action_id=action.id,
         type="screenshot",
+        storage_key=storage_key,
+        size=len(payload),
+    )
+
+
+def _store_dom_html_artifact(action: Action, dom_html: str) -> Artifact | None:
+    try:
+        payload = str(dom_html).encode("utf-8", errors="replace")
+    except Exception:
+        return None
+
+    workspace_prefix = str(action.workspace_id)
+    storage_key = f"{workspace_prefix}/{action.id}-dom.html"
+
+    base_dir = Path(settings.artifacts_dir)
+    path = base_dir / storage_key
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(payload)
+    except Exception:
+        return None
+
+    return Artifact(
+        workspace_id=action.workspace_id,
+        action_id=action.id,
+        type="dom",
+        storage_key=storage_key,
+        size=len(payload),
+    )
+
+
+def _store_trace_artifact(action: Action, trace_base64: str) -> Artifact | None:
+    try:
+        payload = base64.b64decode(trace_base64, validate=True)
+    except Exception:
+        return None
+
+    workspace_prefix = str(action.workspace_id)
+    storage_key = f"{workspace_prefix}/{action.id}-trace.zip"
+
+    base_dir = Path(settings.artifacts_dir)
+    path = base_dir / storage_key
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(payload)
+    except Exception:
+        return None
+
+    return Artifact(
+        workspace_id=action.workspace_id,
+        action_id=action.id,
+        type="trace",
         storage_key=storage_key,
         size=len(payload),
     )
