@@ -10,3 +10,12 @@
 - `apps/api/`：FastAPI 后端（鉴权、用户管理、后续接入队列与浏览器集群）
 - `apps/web/`：Next.js 控制台（左侧导航：用户功能 / 管理员功能）
 
+## 部署流程（Github Actions + ClawCloud）
+
+镜像仓库：`ghcr.io/xxrenzhe/autosocial`
+
+- 推送到 `main` 分支：自动构建并推送 `prod-latest`、`prod-{commitid}`
+- 打版本标签（例如 `v3.0.0`）：自动构建并推送 `prod-{version}`、`prod-{commitid}`
+
+ClawCloud（手动）：
+- 拉取：`ghcr.io/xxrenzhe/autosocial:prod-latest`
