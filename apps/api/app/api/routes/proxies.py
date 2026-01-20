@@ -25,7 +25,7 @@ from app.utils.time import utc_now
 
 router = APIRouter()
 
-_ALLOWED_POOL_STRATEGIES = {"hash", "random"}
+_ALLOWED_POOL_STRATEGIES = {"hash", "round_robin", "health_aware"}
 _ALLOWED_SCHEMES = {"http", "https", "socks5"}
 
 
@@ -39,6 +39,8 @@ def _require_encryption_key() -> None:
 
 def _normalize_strategy(strategy: str) -> str:
     normalized = str(strategy or "").strip().lower()
+    if normalized == "random":
+        normalized = "round_robin"
     if normalized not in _ALLOWED_POOL_STRATEGIES:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid proxy pool strategy")
     return normalized

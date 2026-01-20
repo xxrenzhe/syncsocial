@@ -12,7 +12,7 @@ export default function ProxiesPage() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const poolStrategies = useMemo(() => ["hash", "random"], []);
+  const poolStrategies = useMemo(() => ["hash", "round_robin", "health_aware"], []);
   const schemes = useMemo(() => ["http", "https", "socks5"], []);
 
   const [poolName, setPoolName] = useState("");

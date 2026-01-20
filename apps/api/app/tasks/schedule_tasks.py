@@ -54,16 +54,7 @@ def tick_schedules() -> None:
         db.commit()
 
         due_schedules = (
-            db.scalars(
-                select(Schedule)
-                .where(
-                    Schedule.enabled.is_(True),
-                    Schedule.frequency != "manual",
-                    Schedule.next_run_at.is_not(None),
-                    Schedule.next_run_at <= now,
-                )
-                .with_for_update(skip_locked=True)
-            )
+            db.scalars(_select_due_schedules(db, now))
             .all()
         )
 
@@ -126,6 +117,19 @@ def tick_schedules() -> None:
                     execute_account_run.delay(str(account_run_id))
                 except Exception:
                     pass
+
+
+def _select_due_schedules(db, now: datetime):
+    stmt = select(Schedule).where(
+        Schedule.enabled.is_(True),
+        Schedule.frequency != "manual",
+        Schedule.next_run_at.is_not(None),
+        Schedule.next_run_at <= now,
+    )
+    bind = db.get_bind()
+    if bind is not None and getattr(bind.dialect, "name", "") != "sqlite":
+        stmt = stmt.with_for_update(skip_locked=True)
+    return stmt
 
 
 def _has_running_run(db, schedule_id) -> bool:

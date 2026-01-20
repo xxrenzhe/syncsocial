@@ -3,9 +3,11 @@ from __future__ import annotations
 import os
 import sys
 from logging.config import fileConfig
+from pathlib import Path
 
 from alembic import context
 from sqlalchemy import engine_from_config, pool
+from sqlalchemy.engine.url import make_url
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
@@ -18,6 +20,15 @@ if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
 config.set_main_option("sqlalchemy.url", settings.database_url)
+
+if settings.database_url.startswith("sqlite"):
+    url = make_url(settings.database_url)
+    db_path = url.database
+    if db_path and db_path not in {":memory:"}:
+        path = Path(db_path)
+        if not path.is_absolute():
+            path = Path.cwd() / path
+        path.parent.mkdir(parents=True, exist_ok=True)
 target_metadata = Base.metadata
 
 
@@ -52,4 +63,3 @@ if context.is_offline_mode():
     run_migrations_offline()
 else:
     run_migrations_online()
-

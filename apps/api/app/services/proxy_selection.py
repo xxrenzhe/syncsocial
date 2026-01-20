@@ -15,7 +15,7 @@ from app.models.proxy import Proxy
 from app.models.proxy_pool import ProxyPool
 from app.utils.time import ensure_utc, utc_now
 
-_ALLOWED_POOL_STRATEGIES = {"hash", "random"}
+_ALLOWED_POOL_STRATEGIES = {"hash", "round_robin", "health_aware", "random"}
 _ALLOWED_SCHEMES = {"http", "https", "socks5"}
 _COOLDOWN_BY_FAILURES: dict[int, timedelta] = {
     1: timedelta(seconds=90),
@@ -64,6 +64,8 @@ def select_proxy_for_account_with_id(
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid proxy_pool_id")
 
     strategy = str(pool.strategy or "").strip().lower() or "hash"
+    if strategy == "random":
+        strategy = "round_robin"
     if strategy not in _ALLOWED_POOL_STRATEGIES:
         strategy = "hash"
 
@@ -85,14 +87,33 @@ def select_proxy_for_account_with_id(
         proxies = all_proxies
 
     chosen: Proxy
-    if strategy == "random":
-        weights = [max(1, int(getattr(p, "weight", 1) or 1)) for p in proxies]
-        seed = hashlib.sha256(f"{account_id}:{attempt}".encode("utf-8")).digest()
+    offset = int(attempt) if isinstance(attempt, int) and attempt > 0 else 0
+
+    if strategy == "health_aware":
+        sorted_proxies = sorted(
+            proxies,
+            key=lambda p: (
+                int(getattr(p, "consecutive_failures", 0) or 0),
+                1 if getattr(p, "last_checked_at", None) is None else 0,
+                ensure_utc(getattr(p, "last_checked_at", None) or now),
+            ),
+        )
+        min_failures = int(getattr(sorted_proxies[0], "consecutive_failures", 0) or 0) if sorted_proxies else 0
+        candidate_pool = [p for p in sorted_proxies if int(getattr(p, "consecutive_failures", 0) or 0) == min_failures]
+        if not candidate_pool:
+            candidate_pool = sorted_proxies or proxies
+
+        weights = [max(1, int(getattr(p, "weight", 1) or 1)) for p in candidate_pool]
+        seed = hashlib.sha256(f"{account_id}:{int(ensure_utc(now).timestamp()) // 3600}:{offset}:health".encode("utf-8")).digest()
         rnd = random.Random(int.from_bytes(seed[:8], "big"))
-        chosen = rnd.choices(proxies, weights=weights, k=1)[0]
+        chosen = rnd.choices(candidate_pool, weights=weights, k=1)[0]
+    elif strategy == "round_robin":
+        slot = int(ensure_utc(now).timestamp()) // 3600
+        digest = hashlib.sha256(str(account_id).encode("utf-8")).digest()
+        index = (int.from_bytes(digest[:4], "big") + slot + offset) % len(proxies)
+        chosen = proxies[index]
     else:
         digest = hashlib.sha256(str(account_id).encode("utf-8")).digest()
-        offset = int(attempt) if isinstance(attempt, int) and attempt > 0 else 0
         index = (int.from_bytes(digest[:4], "big") + offset) % len(proxies)
         chosen = proxies[index]
 

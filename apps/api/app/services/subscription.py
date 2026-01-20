@@ -91,6 +91,28 @@ def increment_automation_runtime_seconds(
         )
         db.execute(stmt)
         return seconds
+    if bind is not None and getattr(bind.dialect, "name", "") == "sqlite":
+        try:
+            from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+
+            stmt = sqlite_insert(WorkspaceUsageMonthly).values(
+                id=uuid.uuid4(),
+                workspace_id=workspace_id,
+                period_start=period_start,
+                automation_runtime_seconds=seconds,
+            )
+            stmt = stmt.on_conflict_do_update(
+                index_elements=["workspace_id", "period_start"],
+                set_={
+                    "automation_runtime_seconds": WorkspaceUsageMonthly.automation_runtime_seconds
+                    + stmt.excluded.automation_runtime_seconds,
+                    "updated_at": func.now(),
+                },
+            )
+            db.execute(stmt)
+            return seconds
+        except Exception:
+            pass
 
     usage = get_workspace_usage_monthly(db, workspace_id=workspace_id, period_start=period_start)
     if usage is None:

@@ -16,7 +16,7 @@ class Settings(BaseSettings):
 
     environment: str = Field(default="dev", alias="APP_ENV")
     database_url: str = Field(
-        default="postgresql+psycopg://syncsocial:syncsocial@localhost:5432/syncsocial",
+        default="sqlite:///./.local/syncsocial.db",
         alias="DATABASE_URL",
     )
 

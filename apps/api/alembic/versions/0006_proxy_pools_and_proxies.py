@@ -51,22 +51,23 @@ def upgrade() -> None:
     op.create_index("ix_proxies_workspace_id", "proxies", ["workspace_id"])
     op.create_index("ix_proxies_pool_id", "proxies", ["pool_id"])
 
-    op.add_column("social_accounts", sa.Column("proxy_pool_id", sa.Uuid(), nullable=True))
-    op.create_index("ix_social_accounts_proxy_pool_id", "social_accounts", ["proxy_pool_id"])
-    op.create_foreign_key(
-        "fk_social_accounts_proxy_pool_id",
-        "social_accounts",
-        "proxy_pools",
-        ["proxy_pool_id"],
-        ["id"],
-        ondelete="SET NULL",
-    )
+    with op.batch_alter_table("social_accounts") as batch_op:
+        batch_op.add_column(sa.Column("proxy_pool_id", sa.Uuid(), nullable=True))
+        batch_op.create_index("ix_social_accounts_proxy_pool_id", ["proxy_pool_id"])
+        batch_op.create_foreign_key(
+            "fk_social_accounts_proxy_pool_id",
+            "proxy_pools",
+            ["proxy_pool_id"],
+            ["id"],
+            ondelete="SET NULL",
+        )
 
 
 def downgrade() -> None:
-    op.drop_constraint("fk_social_accounts_proxy_pool_id", "social_accounts", type_="foreignkey")
-    op.drop_index("ix_social_accounts_proxy_pool_id", table_name="social_accounts")
-    op.drop_column("social_accounts", "proxy_pool_id")
+    with op.batch_alter_table("social_accounts") as batch_op:
+        batch_op.drop_constraint("fk_social_accounts_proxy_pool_id", type_="foreignkey")
+        batch_op.drop_index("ix_social_accounts_proxy_pool_id")
+        batch_op.drop_column("proxy_pool_id")
 
     op.drop_index("ix_proxies_pool_id", table_name="proxies")
     op.drop_index("ix_proxies_workspace_id", table_name="proxies")
@@ -74,4 +75,3 @@ def downgrade() -> None:
 
     op.drop_index("ix_proxy_pools_workspace_id", table_name="proxy_pools")
     op.drop_table("proxy_pools")
-

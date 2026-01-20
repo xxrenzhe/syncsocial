@@ -3,7 +3,7 @@
 本目录为 SaaS 后端服务（Phase 0：鉴权 + 管理员用户管理）。
 
 本地运行（示例）：
-- 启动依赖：`docker compose up -d`
+- 启动依赖：`docker compose up -d`（SQLite 默认，不需要 Postgres；仍需要 Redis / browser-node）
 - 安装依赖（仅 API Server）：`python -m venv .venv && source .venv/bin/activate && pip install -r requirements.txt`
 - 本机浏览器模式（BROWSER_CLUSTER_MODE=local）额外安装：`pip install -r requirements.local.txt && python -m playwright install chromium`
 - 初始化数据库：`alembic upgrade head`

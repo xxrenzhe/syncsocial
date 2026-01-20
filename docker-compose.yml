@@ -3,7 +3,7 @@ services:
     build:
       context: ./apps/api
     environment:
-      DATABASE_URL: postgresql+psycopg://syncsocial:syncsocial@postgres:5432/syncsocial
+      DATABASE_URL: sqlite:///./.local/syncsocial.db
       JWT_SECRET_KEY: ${JWT_SECRET_KEY:-dev-secret}
       REFRESH_TOKEN_PEPPER: ${REFRESH_TOKEN_PEPPER:-dev-pepper}
       CREDENTIAL_ENCRYPTION_KEY: ${CREDENTIAL_ENCRYPTION_KEY:-}
@@ -18,7 +18,6 @@ services:
     volumes:
       - localdata:/app/.local
     depends_on:
-      - postgres
       - redis
 
   worker:
@@ -26,7 +25,7 @@ services:
       context: ./apps/api
     command: celery -A app.celery_app:celery_app worker -l info
     environment:
-      DATABASE_URL: postgresql+psycopg://syncsocial:syncsocial@postgres:5432/syncsocial
+      DATABASE_URL: sqlite:///./.local/syncsocial.db
       JWT_SECRET_KEY: ${JWT_SECRET_KEY:-dev-secret}
       REFRESH_TOKEN_PEPPER: ${REFRESH_TOKEN_PEPPER:-dev-pepper}
       CREDENTIAL_ENCRYPTION_KEY: ${CREDENTIAL_ENCRYPTION_KEY:-}
@@ -38,7 +37,6 @@ services:
     volumes:
       - localdata:/app/.local
     depends_on:
-      - postgres
       - redis
       - browser-node
 
@@ -47,7 +45,7 @@ services:
       context: ./apps/api
     command: celery -A app.celery_app:celery_app beat -l info
     environment:
-      DATABASE_URL: postgresql+psycopg://syncsocial:syncsocial@postgres:5432/syncsocial
+      DATABASE_URL: sqlite:///./.local/syncsocial.db
       JWT_SECRET_KEY: ${JWT_SECRET_KEY:-dev-secret}
       REFRESH_TOKEN_PEPPER: ${REFRESH_TOKEN_PEPPER:-dev-pepper}
       CREDENTIAL_ENCRYPTION_KEY: ${CREDENTIAL_ENCRYPTION_KEY:-}
@@ -56,7 +54,6 @@ services:
     volumes:
       - localdata:/app/.local
     depends_on:
-      - postgres
       - redis
 
   web:
@@ -80,17 +77,6 @@ services:
       - "9300:9300"
       - "7900:7900"
 
-  postgres:
-    image: postgres:16
-    environment:
-      POSTGRES_USER: syncsocial
-      POSTGRES_PASSWORD: syncsocial
-      POSTGRES_DB: syncsocial
-    ports:
-      - "5432:5432"
-    volumes:
-      - pgdata:/var/lib/postgresql/data
-
   redis:
     image: redis:7
     ports:
@@ -99,6 +85,5 @@ services:
       - redisdata:/data
 
 volumes:
-  pgdata:
   redisdata:
   localdata:
