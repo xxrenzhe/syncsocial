@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import random
 import re
 import uuid
 import urllib.parse
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 from sqlalchemy import or_, select, update
@@ -18,15 +19,20 @@ from app.models.account_run import AccountRun
 from app.models.action import Action
 from app.models.artifact import Artifact
 from app.models.credential import Credential
+from app.models.prompt_stack import PromptStack
 from app.models.run import Run
+from app.models.schedule import Schedule
 from app.models.social_account import SocialAccount
 from app.models.strategy import Strategy
 from app.services.browser_cluster import browser_cluster
+from app.services.llm_gateway import generate_text as llm_generate_text
+from app.services.llm_gateway import get_workspace_llm_config
+from app.services.prompt_stack_engine import generate_prompt_from_stack
 from app.services.proxy_selection import select_proxy_for_account_with_id
 from app.services.subscription import increment_automation_runtime_seconds
 from app.utils.time import utc_now
 
-_TWEET_ID_RE = re.compile(r"/status/(?P<tweet_id>\\d+)")
+_TWEET_ID_RE = re.compile(r"/status/(?P<tweet_id>\d+)")
 _RETRYABLE_ACCOUNT_RUN_ERRORS = {"PROXY_FAILED", "BROWSER_NODE_ERROR", "BROWSER_ERROR"}
 
 
@@ -78,6 +84,9 @@ def execute_account_run(account_run_id: str) -> None:
         if account is None:
             _fail_account_run(db, account_run, run, error_code="ACCOUNT_NOT_FOUND")
             return
+        if str(account.platform_key or "").strip().lower() != str(strategy.platform_key or "").strip().lower():
+            _fail_account_run(db, account_run, run, error_code="STRATEGY_PLATFORM_MISMATCH")
+            return
 
         credential = db.scalar(
             select(Credential).where(
@@ -98,11 +107,69 @@ def execute_account_run(account_run_id: str) -> None:
             return
 
         strategy_type = _strategy_type(strategy)
-        if _strategy_requires_action_text(strategy_type) and not _resolve_action_text(strategy):
+        if _strategy_requires_action_text(strategy_type) and not _resolve_action_text(db, workspace_id=account_run.workspace_id, strategy=strategy):
+            _fail_account_run(db, account_run, run, error_code="STRATEGY_CONFIG_INVALID")
+            return
+        if _resolve_action_type(strategy_type) == "x_publish_post" and not _strategy_has_publish_content(strategy):
             _fail_account_run(db, account_run, run, error_code="STRATEGY_CONFIG_INVALID")
             return
 
-        if strategy_type in {
+        if strategy_type in {"keyword_repost", "x_keyword_repost"}:
+            config = strategy.config if isinstance(strategy.config, dict) else {}
+            if not _resolve_search_query(config):
+                _fail_account_run(db, account_run, run, error_code="STRATEGY_CONFIG_INVALID")
+                return
+            search_specs = _build_search_collect_specs(db, strategy, account_run=account_run, account=account, run=run)
+            executed_actions, results, error_code = _execute_specs(
+                db,
+                account_run=account_run,
+                run=run,
+                account=account,
+                strategy=strategy,
+                storage_state=storage_state,
+                specs=search_specs,
+            )
+            if error_code is not None:
+                if not _retry_or_fail_account_run(db, account_run, run, error_code=error_code):
+                    _fail_account_run(db, account_run, run, error_code=error_code)
+                return
+
+            candidates = _extract_candidates(executed_actions, results)
+            if not candidates:
+                account_run.status = "succeeded"
+                account_run.finished_at = utc_now()
+                account_run.next_retry_at = None
+                db.add(account_run)
+                db.commit()
+                _finalize_run_if_done(db, run.id)
+                return
+
+            action_specs = _build_keyword_repost_specs(
+                db,
+                strategy,
+                account_run=account_run,
+                account=account,
+                run=run,
+                candidates=candidates,
+            )
+            if not action_specs:
+                _fail_account_run(db, account_run, run, error_code="CONTENT_GENERATION_FAILED")
+                return
+            _, _, action_error = _execute_specs(
+                db,
+                account_run=account_run,
+                run=run,
+                account=account,
+                strategy=strategy,
+                storage_state=storage_state,
+                specs=action_specs,
+            )
+            if action_error is not None:
+                if not _retry_or_fail_account_run(db, account_run, run, error_code=action_error):
+                    _fail_account_run(db, account_run, run, error_code=action_error)
+                return
+
+        elif strategy_type in {
             "x_search_like",
             "x_search_repost",
             "x_search_reply",
@@ -111,8 +178,12 @@ def execute_account_run(account_run_id: str) -> None:
             "x_verified_repost",
             "x_verified_reply",
             "x_verified_quote",
+            "keyword_like",
+            "keyword_reply",
+            "keyword_quote",
+            "keyword_retweet",
         }:
-            search_specs = _build_search_collect_specs(strategy, account_run=account_run, account=account, run=run)
+            search_specs = _build_search_collect_specs(db, strategy, account_run=account_run, account=account, run=run)
             executed_actions, results, error_code = _execute_specs(
                 db,
                 account_run=account_run,
@@ -138,6 +209,7 @@ def execute_account_run(account_run_id: str) -> None:
                 return
 
             action_specs = _build_search_action_specs(
+                db,
                 strategy,
                 account_run=account_run,
                 account=account,
@@ -157,7 +229,7 @@ def execute_account_run(account_run_id: str) -> None:
                     _fail_account_run(db, account_run, run, error_code=action_error)
                 return
         else:
-            action_specs = _build_action_specs(strategy, account_run=account_run, account=account)
+            action_specs = _build_action_specs(db, strategy, account_run=account_run, account=account)
             _, _, error_code = _execute_specs(
                 db,
                 account_run=account_run,
@@ -279,7 +351,7 @@ def _finalize_run_if_done(db, run_id: uuid.UUID) -> None:
     db.commit()
 
 
-def _build_action_specs(strategy: Strategy, *, account_run: AccountRun, account: SocialAccount) -> list[dict]:
+def _build_action_specs(db, strategy: Strategy, *, account_run: AccountRun, account: SocialAccount) -> list[dict]:
     config = strategy.config if isinstance(strategy.config, dict) else {}
     bandwidth_mode = config.get("bandwidth_mode")
     specs: list[dict] = [
@@ -294,10 +366,81 @@ def _build_action_specs(strategy: Strategy, *, account_run: AccountRun, account:
     ]
 
     action_kind = str(config.get("type") or "").strip().lower()
-    if account.platform_key != "x":
-        return specs
     action_type = _resolve_action_type(action_kind)
     if action_type is None:
+        return specs
+
+    if action_type.startswith("x_") and account.platform_key != "x":
+        return specs
+    if action_type.startswith("reddit_") and account.platform_key != "reddit":
+        return specs
+
+    if action_type == "x_publish_post":
+        texts = _resolve_publish_texts(strategy)
+        media_urls = _resolve_media_urls(config)
+        if not texts and not media_urls:
+            return specs
+
+        max_actions = _get_int_from_config(config, "max_actions", default=1, min_value=1, max_value=10)
+        picked_texts: list[str] = []
+        if texts:
+            random.shuffle(texts)
+            picked_texts = texts[:max_actions]
+        else:
+            picked_texts = [""] * min(max_actions, 1)
+
+        window_days = _get_int_from_config(config, "repeat_window_days", default=1, min_value=1, max_value=365)
+        window_suffix = f":w{_idempotency_window_key(window_days)}"
+
+        max_media_bytes = _get_int_from_config(config, "max_media_bytes", default=150 * 1024, min_value=10 * 1024, max_value=5 * 1024 * 1024)
+        max_download_bytes = _get_int_from_config(config, "max_download_bytes", default=5 * 1024 * 1024, min_value=100 * 1024, max_value=20 * 1024 * 1024)
+        compose_url = str(config.get("compose_url") or "https://x.com/compose/post").strip()
+
+        for text in picked_texts:
+            stable_target = _stable_content_key(text=text, media_urls=media_urls)
+            specs.append(
+                {
+                    "action_type": action_type,
+                    "platform_key": "x",
+                    "target_url": None,
+                    "target_external_id": None,
+                    "idempotency_key": f"{account_run.workspace_id}:{account.id}:{action_type}:{stable_target}:v{strategy.version}{window_suffix}",
+                    "bandwidth_mode": bandwidth_mode,
+                    "action_params": {
+                        "text": text,
+                        "media_urls": media_urls,
+                        "max_media_bytes": max_media_bytes,
+                        "max_download_bytes": max_download_bytes,
+                        "compose_url": compose_url,
+                    },
+                }
+            )
+        return specs
+
+    if action_type == "reddit_post":
+        subreddit = str(config.get("subreddit") or "").strip()
+        title = str(config.get("title") or "").strip()
+        body = str(config.get("text") or config.get("body") or "").strip()
+        if not subreddit or not title:
+            return specs
+
+        max_actions = _get_int_from_config(config, "max_actions", default=1, min_value=1, max_value=5)
+        window_days = _get_int_from_config(config, "repeat_window_days", default=7, min_value=1, max_value=365)
+        window_suffix = f":w{_idempotency_window_key(window_days)}"
+
+        for _ in range(max_actions):
+            stable_target = _stable_content_key(text=f"r/{subreddit}\n{title}\n{body}", media_urls=[])
+            specs.append(
+                {
+                    "action_type": "reddit_post",
+                    "platform_key": "reddit",
+                    "target_url": None,
+                    "target_external_id": None,
+                    "idempotency_key": f"{account_run.workspace_id}:{account.id}:reddit_post:{stable_target}:v{strategy.version}{window_suffix}",
+                    "bandwidth_mode": bandwidth_mode,
+                    "action_params": {"subreddit": subreddit, "title": title, "text": body},
+                }
+            )
         return specs
 
     raw_targets = config.get("targets") or config.get("target_urls") or []
@@ -319,7 +462,7 @@ def _build_action_specs(strategy: Strategy, *, account_run: AccountRun, account:
         targets = targets[: max_actions]
 
     window_suffix = ""
-    if action_type in {"x_reply", "x_quote"}:
+    if action_type in {"x_reply", "x_quote", "reddit_comment"}:
         window_days = _get_int_from_config(config, "repeat_window_days", default=7, min_value=1, max_value=365)
         window_suffix = f":w{_idempotency_window_key(window_days)}"
 
@@ -329,13 +472,13 @@ def _build_action_specs(strategy: Strategy, *, account_run: AccountRun, account:
         if not stable_target:
             continue
         action_params = None
-        if action_type in {"x_reply", "x_quote"}:
-            text = _resolve_action_text(strategy)
+        if action_type in {"x_reply", "x_quote", "reddit_comment"}:
+            text = _resolve_action_text(db, workspace_id=account_run.workspace_id, strategy=strategy, allow_llm=True)
             action_params = {"text": text} if text else {}
         specs.append(
             {
                 "action_type": action_type,
-                "platform_key": "x",
+                "platform_key": account.platform_key,
                 "target_url": target.get("url"),
                 "target_external_id": tweet_id,
                 "idempotency_key": f"{account_run.workspace_id}:{account.id}:{action_type}:{stable_target}:v{strategy.version}{window_suffix}",
@@ -362,6 +505,7 @@ def _execute_specs(
     bandwidth_mode = None
     selected_proxy = None
     selected_proxy_id = None
+    content_generation_failed = False
 
     for spec in specs:
         action = _create_action(db, account_run=account_run, strategy=strategy, account=account, spec=spec)
@@ -370,8 +514,19 @@ def _execute_specs(
         if action.status in {"succeeded", "skipped"}:
             continue
 
-        actions_to_execute.append(action)
         action_params = spec.get("action_params") if isinstance(spec.get("action_params"), dict) else {}
+        if action.action_type in {"x_reply", "x_quote", "reddit_comment", "x_keyword_repost"}:
+            text = str(action_params.get("text") or "").strip()
+            if not text:
+                content_generation_failed = True
+                action.status = "failed"
+                action.error_code = "CONTENT_GENERATION_FAILED"
+                action.metadata_ = {**(action.metadata_ or {}), "message": "Content generation failed (missing text)"}
+                action.finished_at = utc_now()
+                db.add(action)
+                continue
+
+        actions_to_execute.append(action)
         execute_payload.append(
             {
                 "action_type": action.action_type,
@@ -384,8 +539,11 @@ def _execute_specs(
         if bandwidth_mode is None:
             bandwidth_mode = _normalize_bandwidth_mode(spec.get("bandwidth_mode"))
 
+    if content_generation_failed:
+        db.commit()
+
     if not actions_to_execute:
-        return [], [], None
+        return [], [], "CONTENT_GENERATION_FAILED" if content_generation_failed else None
 
     started_at = utc_now()
     for action in actions_to_execute:
@@ -564,6 +722,8 @@ def _execute_specs(
 
     if failures:
         cause = next((err for _, err in failures if err and err != "ABORTED"), None) or failures[0][1] or "ACTION_FAILED"
+        if content_generation_failed:
+            cause = "CONTENT_GENERATION_FAILED"
 
         if selected_proxy_id and any(err == "PROXY_FAILED" for _, err in failures):
             from app.models.proxy import Proxy as ProxyModel
@@ -590,7 +750,7 @@ def _execute_specs(
             proxy_row.last_checked_at = utc_now()
             db.add(proxy_row)
             db.commit()
-    return actions_to_execute, results, None
+    return actions_to_execute, results, "CONTENT_GENERATION_FAILED" if content_generation_failed else None
 
 
 def _extract_tweet_id(url: str) -> str | None:
@@ -624,6 +784,16 @@ def _resolve_action_type(action_kind: str) -> str | None:
         return "x_reply"
     if kind in {"x_quote", "quote"}:
         return "x_quote"
+    if kind in {"x_publish_post", "x_publish", "publish_post", "publish"}:
+        return "x_publish_post"
+    if kind in {"x_keyword_repost", "keyword_repost"}:
+        return "x_keyword_repost"
+    if kind in {"reddit_upvote"}:
+        return "reddit_upvote"
+    if kind in {"reddit_comment"}:
+        return "reddit_comment"
+    if kind in {"reddit_post"}:
+        return "reddit_post"
     return None
 
 
@@ -632,9 +802,83 @@ def _strategy_requires_action_text(strategy_type: str) -> bool:
     return kind.endswith("reply") or kind.endswith("comment") or kind.endswith("quote")
 
 
-def _resolve_action_text(strategy: Strategy) -> str | None:
+def _strategy_has_publish_content(strategy: Strategy) -> bool:
+    config = strategy.config if isinstance(strategy.config, dict) else {}
+    if _resolve_media_urls(config):
+        return True
+    return bool(_resolve_publish_texts(strategy))
+
+
+def _resolve_action_text(
+    db,
+    *,
+    workspace_id: uuid.UUID,
+    strategy: Strategy,
+    allow_llm: bool = False,
+) -> str | None:
     config = strategy.config if isinstance(strategy.config, dict) else {}
     kind = _strategy_type(strategy)
+    use_llm = _should_use_llm(config)
+
+    prompt_stack_keys: list[str] = []
+    if kind.endswith("quote") or kind in {"x_quote", "quote"}:
+        prompt_stack_keys = ["quote_prompt_stack_key", "prompt_stack_key"]
+    elif kind.endswith("reply") or kind.endswith("comment") or kind in {"x_reply", "reply", "comment", "x_comment"}:
+        prompt_stack_keys = ["reply_prompt_stack_key", "prompt_stack_key"]
+    else:
+        prompt_stack_keys = ["prompt_stack_key"]
+
+    if use_llm:
+        llm_row = get_workspace_llm_config(db, workspace_id=workspace_id)
+        if llm_row is None:
+            return None
+        picked_key = next(
+            (
+                str(config.get(key_name)).strip()
+                for key_name in prompt_stack_keys
+                if isinstance(config.get(key_name), str) and str(config.get(key_name)).strip()
+            ),
+            None,
+        )
+        if not picked_key:
+            return None
+        row = db.scalar(select(PromptStack).where(PromptStack.workspace_id == workspace_id, PromptStack.key == picked_key))
+        if row is None:
+            return None
+        payload = row.payload if isinstance(row.payload, dict) else {}
+        prompt = generate_prompt_from_stack(payload)
+        if not prompt.strip():
+            return None
+        if not allow_llm:
+            return prompt.strip()
+        try:
+            system, temperature, max_tokens = _resolve_llm_params(config)
+            generated = llm_generate_text(
+                db,
+                workspace_id=workspace_id,
+                prompt=prompt,
+                system=system,
+                temperature=temperature,
+                max_tokens=max_tokens,
+            )
+        except Exception:
+            return None
+        cleaned = _sanitize_generated_text(generated)
+        cleaned = _enforce_text_limits(cleaned, kind=kind, config=config)
+        return cleaned or None
+
+    for key_name in prompt_stack_keys:
+        raw_key = config.get(key_name)
+        if isinstance(raw_key, str) and raw_key.strip():
+            stack_key = raw_key.strip()
+            row = db.scalar(select(PromptStack).where(PromptStack.workspace_id == workspace_id, PromptStack.key == stack_key))
+            if row is None:
+                return None
+            payload = row.payload if isinstance(row.payload, dict) else {}
+            generated = generate_prompt_from_stack(payload)
+            if generated.strip():
+                return generated.strip()
+            return None
 
     if kind.endswith("quote") or kind in {"x_quote", "quote"}:
         string_keys = ["quote_text", "text"]
@@ -661,6 +905,92 @@ def _resolve_action_text(strategy: Strategy) -> str | None:
     return None
 
 
+def _should_use_llm(config: dict) -> bool:
+    return bool(config.get("use_llm") is True or config.get("llm_enabled") is True)
+
+
+def _resolve_llm_params(config: dict) -> tuple[str | None, float | None, int | None]:
+    system = str(config.get("llm_system") or "").strip() or None
+    if system is None:
+        system = "只输出最终要发布的文本，不要解释，不要使用 markdown，不要输出 JSON。"
+
+    temperature = None
+    if config.get("llm_temperature") is not None:
+        try:
+            temperature = float(config.get("llm_temperature"))
+        except Exception:
+            temperature = None
+
+    max_tokens = None
+    if config.get("llm_max_tokens") is not None:
+        try:
+            max_tokens = int(config.get("llm_max_tokens"))
+        except Exception:
+            max_tokens = None
+
+    return system, temperature, max_tokens
+
+
+def _sanitize_generated_text(text: str) -> str:
+    cleaned = str(text or "").strip()
+    if not cleaned:
+        return ""
+    if cleaned.startswith("```") and cleaned.endswith("```"):
+        cleaned = cleaned.strip("`").strip()
+    cleaned = cleaned.strip().strip('"').strip("'").strip("“”").strip("‘’").strip()
+    return cleaned
+
+
+def _enforce_text_limits(text: str, *, kind: str, config: dict) -> str:
+    cleaned = str(text or "").strip()
+    if not cleaned:
+        return ""
+
+    max_chars = None
+    if config.get("max_chars") is not None:
+        try:
+            max_chars = int(config.get("max_chars"))
+        except Exception:
+            max_chars = None
+    elif kind.startswith("x_"):
+        max_chars = 240
+
+    if max_chars is not None and max_chars > 0 and len(cleaned) > max_chars:
+        cleaned = cleaned[:max_chars].rstrip()
+    return cleaned
+
+
+def _resolve_publish_texts(strategy: Strategy) -> list[str]:
+    config = strategy.config if isinstance(strategy.config, dict) else {}
+    raw = config.get("texts") or config.get("post_texts")
+    if isinstance(raw, list):
+        cleaned = [str(item).strip() for item in raw if str(item).strip()]
+        if cleaned:
+            return cleaned
+    raw_single = config.get("text") or config.get("post_text")
+    if isinstance(raw_single, str) and raw_single.strip():
+        return [raw_single.strip()]
+    return []
+
+
+def _resolve_media_urls(config: dict) -> list[str]:
+    raw = config.get("media_urls") or config.get("media") or []
+    urls: list[str] = []
+    if isinstance(raw, list):
+        for item in raw:
+            url = str(item or "").strip()
+            if url:
+                urls.append(url)
+    return urls[:4]
+
+
+def _stable_content_key(*, text: str, media_urls: list[str]) -> str:
+    normalized_text = (text or "").strip()
+    normalized_media = [str(u).strip() for u in media_urls if str(u).strip()]
+    payload = f"{normalized_text}\n" + "\n".join(normalized_media)
+    return hashlib.sha1(payload.encode("utf-8")).hexdigest()[:16]
+
+
 def _idempotency_window_key(window_days: int) -> str:
     now = utc_now()
     if window_days <= 1:
@@ -679,11 +1009,11 @@ def _idempotency_window_key(window_days: int) -> str:
 
 
 def _build_search_collect_specs(
-    strategy: Strategy, *, account_run: AccountRun, account: SocialAccount, run: Run
+    db, strategy: Strategy, *, account_run: AccountRun, account: SocialAccount, run: Run
 ) -> list[dict]:
     config = strategy.config if isinstance(strategy.config, dict) else {}
     bandwidth_mode = config.get("bandwidth_mode")
-    specs = _build_action_specs(strategy, account_run=account_run, account=account)
+    specs = _build_action_specs(db, strategy, account_run=account_run, account=account)
 
     strategy_type = _strategy_type(strategy)
     verified_only = bool(config.get("verified_only") is True or strategy_type.startswith("x_verified_"))
@@ -706,7 +1036,9 @@ def _build_search_collect_specs(
     if verified_only and "filter:verified" not in query.lower():
         query = f"{query} filter:verified"
 
-    search_url = _build_x_search_url(query=query, search_mode=str(config.get("search_mode") or "live"))
+    search_mode = str(config.get("search_mode") or "live")
+    search_mode = _resolve_search_mode_from_schedule(db, run=run, default=search_mode)
+    search_url = _build_x_search_url(query=query, search_mode=search_mode)
     max_candidates = _get_int_from_config(config, "max_candidates", default=20, min_value=1, max_value=200)
     scroll_limit = _get_int_from_config(config, "scroll_limit", default=6, min_value=0, max_value=50)
     verified_only_dom = verified_only
@@ -724,6 +1056,7 @@ def _build_search_collect_specs(
                 "scroll_limit": scroll_limit,
                 "verified_only_dom": verified_only_dom,
             },
+            "metadata": {"search_mode": search_mode},
         }
     )
     return specs
@@ -745,6 +1078,7 @@ def _extract_candidates(executed_actions: list[Action], results: list[dict]) -> 
 
 
 def _build_search_action_specs(
+    db,
     strategy: Strategy,
     *,
     account_run: AccountRun,
@@ -768,6 +1102,11 @@ def _build_search_action_specs(
         return []
     max_actions = _get_int_from_config(config, "max_actions", default=3, min_value=1, max_value=50)
     verified_only = bool(config.get("verified_only") is True or action_kind.startswith("x_verified_"))
+    recency_hours = _optional_int(config, "recency_hours")
+    min_like_count = _optional_int(config, "min_like_count")
+    min_reply_count = _optional_int(config, "min_reply_count")
+    min_view_count = _optional_int(config, "min_view_count")
+    now = utc_now()
 
     random.shuffle(candidates)
     picked: list[dict] = []
@@ -776,6 +1115,22 @@ def _build_search_action_specs(
             break
         if not isinstance(cand, dict):
             continue
+
+        if recency_hours is not None and recency_hours > 0:
+            ts_raw = cand.get("timestamp")
+            ts = _parse_iso_datetime(str(ts_raw)) if ts_raw else None
+            if ts is None:
+                continue
+            if ts < now - timedelta(hours=recency_hours):
+                continue
+
+        if min_like_count is not None and _safe_int(cand.get("like_count")) < min_like_count:
+            continue
+        if min_reply_count is not None and _safe_int(cand.get("reply_count")) < min_reply_count:
+            continue
+        if min_view_count is not None and _safe_int(cand.get("view_count")) < min_view_count:
+            continue
+
         tweet_id = str(cand.get("tweet_id") or "").strip() or None
         url = str(cand.get("url") or "").strip() or None
         if not tweet_id and not url:
@@ -798,7 +1153,7 @@ def _build_search_action_specs(
             continue
         action_params = None
         if action_type in {"x_reply", "x_quote"}:
-            text = _resolve_action_text(strategy)
+            text = _resolve_action_text(db, workspace_id=account_run.workspace_id, strategy=strategy, allow_llm=True)
             action_params = {"text": text} if text else {}
         specs.append(
             {
@@ -812,6 +1167,166 @@ def _build_search_action_specs(
             }
         )
     return specs
+
+
+def _build_keyword_repost_specs(
+    db,
+    strategy: Strategy,
+    *,
+    account_run: AccountRun,
+    account: SocialAccount,
+    run: Run,
+    candidates: list[dict],
+) -> list[dict]:
+    config = strategy.config if isinstance(strategy.config, dict) else {}
+    bandwidth_mode = config.get("bandwidth_mode")
+
+    stack_key = _resolve_keyword_repost_prompt_stack_key(config)
+    if stack_key is None:
+        default_row = db.scalar(
+            select(PromptStack).where(PromptStack.workspace_id == account_run.workspace_id, PromptStack.key == "keyword_repost")
+        )
+        if default_row is not None:
+            stack_key = "keyword_repost"
+
+    prompt_template = str(config.get("prompt") or "").strip() or None
+    if stack_key is not None:
+        row = db.scalar(select(PromptStack).where(PromptStack.workspace_id == account_run.workspace_id, PromptStack.key == stack_key))
+        if row is None:
+            return []
+        payload = row.payload if isinstance(row.payload, dict) else {}
+        generated = generate_prompt_from_stack(payload)
+        prompt_template = generated.strip() or prompt_template
+
+    use_llm = _should_use_llm(config)
+    if use_llm and get_workspace_llm_config(db, workspace_id=account_run.workspace_id) is None:
+        return []
+
+    max_actions = _get_int_from_config(config, "max_actions", default=1, min_value=1, max_value=10)
+    window_days = _get_int_from_config(config, "repeat_window_days", default=7, min_value=1, max_value=365)
+    window_suffix = f":w{_idempotency_window_key(window_days)}"
+    now = utc_now()
+
+    recency_hours = _optional_int(config, "recency_hours")
+    min_like_count = _optional_int(config, "min_like_count")
+    min_reply_count = _optional_int(config, "min_reply_count")
+    min_view_count = _optional_int(config, "min_view_count")
+
+    max_media_bytes = _get_int_from_config(config, "max_media_bytes", default=150 * 1024, min_value=10 * 1024, max_value=5 * 1024 * 1024)
+    max_download_bytes = _get_int_from_config(config, "max_download_bytes", default=5 * 1024 * 1024, min_value=100 * 1024, max_value=20 * 1024 * 1024)
+    compose_url = str(config.get("compose_url") or "https://x.com/compose/post").strip()
+    media_urls = _resolve_media_urls(config)
+
+    random.shuffle(candidates)
+    specs: list[dict] = []
+    for cand in candidates:
+        if len(specs) >= max_actions:
+            break
+        if not isinstance(cand, dict):
+            continue
+
+        source_text = str(cand.get("text") or "").strip()
+        if not source_text:
+            continue
+
+        if recency_hours is not None and recency_hours > 0:
+            ts_raw = cand.get("timestamp")
+            ts = _parse_iso_datetime(str(ts_raw)) if ts_raw else None
+            if ts is None:
+                continue
+            if ts < now - timedelta(hours=recency_hours):
+                continue
+
+        if min_like_count is not None and _safe_int(cand.get("like_count")) < min_like_count:
+            continue
+        if min_reply_count is not None and _safe_int(cand.get("reply_count")) < min_reply_count:
+            continue
+        if min_view_count is not None and _safe_int(cand.get("view_count")) < min_view_count:
+            continue
+
+        tweet_id = str(cand.get("tweet_id") or "").strip() or None
+        url = str(cand.get("url") or "").strip() or None
+        stable_target = tweet_id or url
+        if not stable_target:
+            continue
+
+        template = prompt_template or "请将下面的内容改写成一条新的推文，表达自然、避免抄袭，只输出最终推文。"
+        rendered = _render_template(
+            template,
+            {
+                "source_text": source_text,
+                "source_url": url or "",
+                "source_tweet_id": tweet_id or "",
+            },
+        )
+
+        final_text = rendered.strip()
+        if use_llm:
+            full_prompt = rendered
+            if "{{source_text}}" not in template:
+                full_prompt = f"{rendered}\n\n原文：\n{source_text}"
+            try:
+                system, temperature, max_tokens = _resolve_llm_params(config)
+                generated = llm_generate_text(
+                    db,
+                    workspace_id=account_run.workspace_id,
+                    prompt=full_prompt,
+                    system=system,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                )
+            except Exception:
+                continue
+            final_text = _sanitize_generated_text(generated)
+
+        final_text = _enforce_text_limits(final_text, kind="x_keyword_repost", config=config)
+        if not final_text:
+            continue
+
+        specs.append(
+            {
+                "action_type": "x_keyword_repost",
+                "platform_key": "x",
+                "target_url": url,
+                "target_external_id": tweet_id,
+                "idempotency_key": f"{account_run.workspace_id}:{account.id}:x_keyword_repost:{stable_target}:v{strategy.version}{window_suffix}",
+                "bandwidth_mode": bandwidth_mode,
+                "action_params": {
+                    "text": final_text,
+                    "media_urls": media_urls,
+                    "max_media_bytes": max_media_bytes,
+                    "max_download_bytes": max_download_bytes,
+                    "compose_url": compose_url,
+                },
+                "metadata": {
+                    "source": {
+                        "tweet_id": tweet_id,
+                        "url": url,
+                        "is_verified": cand.get("is_verified"),
+                        "like_count": cand.get("like_count"),
+                        "reply_count": cand.get("reply_count"),
+                        "view_count": cand.get("view_count"),
+                    }
+                },
+            }
+        )
+
+    return specs
+
+
+def _resolve_keyword_repost_prompt_stack_key(config: dict) -> str | None:
+    for key in ["keyword_repost_prompt_stack_key", "keyword_repost_stack_key", "prompt_stack_key"]:
+        raw = config.get(key)
+        if isinstance(raw, str) and raw.strip():
+            return raw.strip()
+    return None
+
+
+def _render_template(template: str, values: dict[str, str]) -> str:
+    rendered = str(template or "")
+    for key, value in values.items():
+        rendered = rendered.replace(f"{{{{{key}}}}}", value)
+    return rendered
 
 
 def _resolve_search_query(config: dict) -> str | None:
@@ -838,6 +1353,50 @@ def _build_x_search_url(*, query: str, search_mode: str) -> str:
     return f"https://x.com/search?q={q_value}&src=typed_query&f={f_value}"
 
 
+def _resolve_search_mode_from_schedule(db, *, run: Run, default: str) -> str:
+    if run.schedule_id is None:
+        return default
+    schedule = db.get(Schedule, run.schedule_id)
+    if schedule is None or schedule.workspace_id != run.workspace_id:
+        return default
+    random_config = schedule.random_config if isinstance(schedule.random_config, dict) else {}
+    if random_config.get("enabled") is False:
+        return default
+
+    override = (
+        random_config.get("random_search_type")
+        or random_config.get("random_search_mode")
+        or random_config.get("search_mode")
+        or random_config.get("search_type")
+    )
+    if isinstance(override, str) and override.strip():
+        mode = override.strip().lower()
+        if mode in {"top", "live", "latest"}:
+            return mode
+        if mode in {"random", "auto"}:
+            return _weighted_random_search_mode(random_config)
+
+    if override is True or random_config.get("randomize_search_type") is True:
+        return _weighted_random_search_mode(random_config)
+
+    return default
+
+
+def _weighted_random_search_mode(random_config: dict) -> str:
+    top_p = _optional_int(random_config, "search_type_top_probability")
+    live_p = _optional_int(random_config, "search_type_live_probability")
+    if top_p is None:
+        top_p = 50
+    if live_p is None:
+        live_p = 50
+
+    total = max(0, top_p) + max(0, live_p)
+    if total <= 0:
+        return random.choice(["top", "live"])
+    pick = random.randint(1, total)
+    return "top" if pick <= top_p else "live"
+
+
 def _get_int_from_config(config: dict, key: str, *, default: int, min_value: int, max_value: int) -> int:
     raw = config.get(key, default)
     try:
@@ -849,6 +1408,38 @@ def _get_int_from_config(config: dict, key: str, *, default: int, min_value: int
     if value > max_value:
         return max_value
     return value
+
+
+def _optional_int(config: dict, key: str) -> int | None:
+    raw = config.get(key)
+    if raw is None:
+        return None
+    try:
+        return max(0, int(raw))
+    except Exception:
+        return None
+
+
+def _safe_int(value: object) -> int:
+    if value is None:
+        return 0
+    try:
+        return int(value)
+    except Exception:
+        return 0
+
+
+def _parse_iso_datetime(raw: str) -> datetime | None:
+    value = str(raw or "").strip()
+    if not value:
+        return None
+    try:
+        dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except Exception:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
 
 
 def _create_action(
@@ -867,6 +1458,7 @@ def _create_action(
     if existing is not None:
         return existing
 
+    extra_meta = spec.get("metadata") if isinstance(spec.get("metadata"), dict) else {}
     action = Action(
         workspace_id=account_run.workspace_id,
         account_run_id=account_run.id,
@@ -877,7 +1469,7 @@ def _create_action(
         idempotency_key=idempotency_key[:500],
         status="queued",
         error_code=None,
-        metadata_={"strategy_id": str(strategy.id), "strategy_version": strategy.version},
+        metadata_={"strategy_id": str(strategy.id), "strategy_version": strategy.version, **extra_meta},
         started_at=None,
         finished_at=None,
     )

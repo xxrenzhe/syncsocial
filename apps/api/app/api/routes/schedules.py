@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import random
 import uuid
 from datetime import datetime, timezone
 
@@ -41,19 +42,30 @@ def _resolve_accounts(db: Session, workspace_id: uuid.UUID, selector: dict) -> l
             except ValueError:
                 continue
         if parsed:
-            return db.scalars(
+            rows = db.scalars(
                 select(SocialAccount).where(
                     SocialAccount.workspace_id == workspace_id,
                     SocialAccount.id.in_(parsed),
                 )
             ).all()
+            rows_by_id = {row.id: row for row in rows}
+            return [rows_by_id[account_id] for account_id in parsed if account_id in rows_by_id]
 
     all_flag = selector.get("all")
     if all_flag is True:
-        return db.scalars(select(SocialAccount).where(SocialAccount.workspace_id == workspace_id)).all()
+        return (
+            db.scalars(
+                select(SocialAccount)
+                .where(SocialAccount.workspace_id == workspace_id, SocialAccount.status != "disabled")
+                .order_by(SocialAccount.created_at.asc())
+            )
+            .all()
+        )
 
     return db.scalars(
-        select(SocialAccount).where(SocialAccount.workspace_id == workspace_id, SocialAccount.status == "healthy")
+        select(SocialAccount)
+        .where(SocialAccount.workspace_id == workspace_id, SocialAccount.status == "healthy")
+        .order_by(SocialAccount.created_at.asc())
     ).all()
 
 
@@ -170,6 +182,11 @@ def run_now(
         raise HTTPException(status_code=status.HTTP_402_PAYMENT_REQUIRED, detail=runtime_check.reason or "Runtime quota exceeded")
 
     accounts = _resolve_accounts(db, user.workspace_id, schedule.account_selector)
+    wanted_platform = str(strategy.platform_key or "").strip().lower()
+    if wanted_platform:
+        accounts = [a for a in accounts if str(a.platform_key or "").strip().lower() == wanted_platform]
+    if _should_shuffle_accounts(schedule.random_config or {}):
+        random.shuffle(accounts)
     limit = effective_parallel_limit(subscription, schedule_max_parallel=schedule.max_parallel)
     if len(accounts) > limit:
         accounts = accounts[:limit]
@@ -206,13 +223,27 @@ def run_now(
             pass
 
     schedule.last_run_at = utc_now()
-    schedule.next_run_at = compute_next_run_at(
-        frequency=schedule.frequency,
-        schedule_spec=schedule.schedule_spec or {},
-        random_config=schedule.random_config or {},
-        now=utc_now(),
-    )
+    if str(schedule.frequency or "").strip().lower() == "once":
+        schedule.enabled = False
+        schedule.next_run_at = None
+    else:
+        schedule.next_run_at = compute_next_run_at(
+            frequency=schedule.frequency,
+            schedule_spec=schedule.schedule_spec or {},
+            random_config=schedule.random_config or {},
+            now=utc_now(),
+        )
     db.add(schedule)
     db.commit()
 
     return RunPublic.model_validate(run, from_attributes=True)
+
+
+def _should_shuffle_accounts(random_config: dict) -> bool:
+    if random_config.get("enabled") is False:
+        return False
+    if random_config.get("shuffle_accounts") is not None:
+        return bool(random_config.get("shuffle_accounts"))
+    if random_config.get("shuffle") is not None:
+        return bool(random_config.get("shuffle"))
+    return True

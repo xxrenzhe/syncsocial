@@ -15,14 +15,19 @@ export default function SchedulesPage() {
   const [name, setName] = useState("");
   const [strategyId, setStrategyId] = useState("");
   const [accountSelectorText, setAccountSelectorText] = useState('{"all": true}');
-  const [frequency, setFrequency] = useState<"manual" | "interval" | "daily">("manual");
+  const [frequency, setFrequency] = useState<"manual" | "interval" | "custom" | "daily" | "weekly" | "cron" | "once">(
+    "manual",
+  );
   const [scheduleSpecText, setScheduleSpecText] = useState("{}");
   const [randomConfigText, setRandomConfigText] = useState("{}");
   const [maxParallel, setMaxParallel] = useState(1);
 
   useEffect(() => {
-    if (frequency === "interval") setScheduleSpecText('{"every_minutes": 60}');
+    if (frequency === "interval" || frequency === "custom") setScheduleSpecText('{"every_minutes": 60}');
     else if (frequency === "daily") setScheduleSpecText('{"time_of_day": "09:00"}');
+    else if (frequency === "weekly") setScheduleSpecText('{"time_of_day": "09:00", "weekdays": [0,1,2,3,4]}');
+    else if (frequency === "cron") setScheduleSpecText('{"cron": "0 9 * * *"}');
+    else if (frequency === "once") setScheduleSpecText('{"run_at": "2026-01-01T09:00:00Z"}');
     else setScheduleSpecText("{}");
   }, [frequency]);
 
@@ -146,23 +151,27 @@ export default function SchedulesPage() {
         />
         <select
           value={frequency}
-          onChange={(e) => setFrequency(e.target.value as "manual" | "interval" | "daily")}
+          onChange={(e) => setFrequency(e.target.value as "manual" | "interval" | "custom" | "daily" | "weekly" | "cron" | "once")}
           style={{ padding: 10, borderRadius: 8, border: "1px solid #333" }}
         >
           <option value="manual">manual（仅手动触发）</option>
           <option value="interval">interval（按间隔）</option>
+          <option value="custom">custom（按间隔，别名）</option>
           <option value="daily">daily（每天定时）</option>
+          <option value="weekly">weekly（每周定时）</option>
+          <option value="cron">cron（Cron 表达式）</option>
+          <option value="once">once（仅执行一次）</option>
         </select>
         <input
           value={scheduleSpecText}
           onChange={(e) => setScheduleSpecText(e.target.value)}
-          placeholder='schedule_spec JSON，比如 {"every_minutes":60} / {"time_of_day":"09:00"}'
+          placeholder='schedule_spec JSON，比如 {"every_minutes":60} / {"time_of_day":"09:00"} / {"weekdays":[0,2,4],"time_of_day":"09:00"} / {"cron":"0 9 * * *"} / {"run_at":"2026-01-01T09:00:00Z"}'
           style={{ padding: 10, borderRadius: 8, border: "1px solid #333", minWidth: 360 }}
         />
         <input
           value={randomConfigText}
           onChange={(e) => setRandomConfigText(e.target.value)}
-          placeholder='random_config JSON，比如 {"offset_minutes_max":30,"skip_probability":0.2}'
+          placeholder='random_config JSON，比如 {"offset_minutes_min":0,"offset_minutes_max":30,"skip_probability":0.2,"shuffle_accounts":true,"random_search_type":true}'
           style={{ padding: 10, borderRadius: 8, border: "1px solid #333", minWidth: 420 }}
         />
         <input

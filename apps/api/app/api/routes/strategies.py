@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 from app.deps import get_current_user, get_db
 from app.models.strategy import Strategy
 from app.models.user import User
+from app.platforms.registry import get_login_adapter
 from app.schemas.strategy import CreateStrategyRequest, StrategyPublic, UpdateStrategyRequest
 
 router = APIRouter()
@@ -23,6 +24,18 @@ def list_strategies(user: User = Depends(get_current_user), db: Session = Depend
     return [StrategyPublic.model_validate(row, from_attributes=True) for row in rows]
 
 
+@router.get("/{strategy_id}", response_model=StrategyPublic)
+def get_strategy(
+    strategy_id: uuid.UUID,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> StrategyPublic:
+    row = db.get(Strategy, strategy_id)
+    if row is None or row.workspace_id != user.workspace_id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Strategy not found")
+    return StrategyPublic.model_validate(row, from_attributes=True)
+
+
 @router.post("", response_model=StrategyPublic, status_code=status.HTTP_201_CREATED)
 def create_strategy(
     payload: CreateStrategyRequest,
@@ -32,6 +45,10 @@ def create_strategy(
     platform_key = payload.platform_key.strip().lower()
     if not platform_key:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid platform_key")
+    try:
+        get_login_adapter(platform_key)
+    except KeyError:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Unsupported platform_key") from None
 
     row = Strategy(workspace_id=user.workspace_id, name=payload.name, platform_key=platform_key, version=1, config=payload.config)
     db.add(row)

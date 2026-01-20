@@ -219,7 +219,7 @@ export default function AdminSubscriptionPage() {
           <input
             value={artifactRetentionDays}
             onChange={(e) => setArtifactRetentionDays(e.target.value)}
-            placeholder="留空=不限制（MVP 暂不做清理任务）"
+            placeholder="留空=不限制（已启用 artifacts 清理任务）"
             type="number"
             min={0}
             style={{ padding: 10, borderRadius: 8, border: "1px solid #333" }}
@@ -253,4 +253,3 @@ export default function AdminSubscriptionPage() {
     </div>
   );
 }
-

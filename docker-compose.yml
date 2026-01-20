@@ -15,6 +15,8 @@ services:
       BROWSER_NODE_INTERNAL_TOKEN: ${BROWSER_NODE_INTERNAL_TOKEN:-change-me}
     ports:
       - "8000:8000"
+    volumes:
+      - localdata:/app/.local
     depends_on:
       - postgres
       - redis
@@ -33,6 +35,8 @@ services:
       BROWSER_CLUSTER_MODE: remote
       BROWSER_NODE_API_BASE_URL: http://browser-node:9300
       BROWSER_NODE_INTERNAL_TOKEN: ${BROWSER_NODE_INTERNAL_TOKEN:-change-me}
+    volumes:
+      - localdata:/app/.local
     depends_on:
       - postgres
       - redis
@@ -49,6 +53,8 @@ services:
       CREDENTIAL_ENCRYPTION_KEY: ${CREDENTIAL_ENCRYPTION_KEY:-}
       REDIS_URL: redis://redis:6379/0
       CELERY_TASK_ALWAYS_EAGER: "false"
+    volumes:
+      - localdata:/app/.local
     depends_on:
       - postgres
       - redis
@@ -95,3 +101,4 @@ services:
 volumes:
   pgdata:
   redisdata:
+  localdata:

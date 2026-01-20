@@ -5,6 +5,8 @@ def login_url(platform_key: str) -> str:
     key = platform_key.strip().lower()
     if key == "x":
         return "https://x.com/i/flow/login"
+    if key == "reddit":
+        return "https://www.reddit.com/login/"
     raise KeyError(f"Unsupported platform: {platform_key}")
 
 
@@ -12,6 +14,8 @@ def cookie_origin(platform_key: str) -> str:
     key = platform_key.strip().lower()
     if key == "x":
         return "https://x.com"
+    if key == "reddit":
+        return "https://www.reddit.com"
     raise KeyError(f"Unsupported platform: {platform_key}")
 
 
@@ -20,5 +24,7 @@ def is_logged_in(platform_key: str, *, cookies: list[dict]) -> bool:
     if key == "x":
         cookie_names = {str(item.get("name")) for item in cookies}
         return "auth_token" in cookie_names
+    if key == "reddit":
+        cookie_names = {str(item.get("name")) for item in cookies}
+        return "reddit_session" in cookie_names or "token_v2" in cookie_names
     raise KeyError(f"Unsupported platform: {platform_key}")
-

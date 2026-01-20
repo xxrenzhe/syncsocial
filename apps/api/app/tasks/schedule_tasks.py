@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import random
 import uuid
 from datetime import datetime, timedelta, timezone
 
@@ -102,12 +103,16 @@ def tick_schedules() -> None:
 
             if should_skip_run(random_config=schedule.random_config or {}):
                 schedule.last_run_at = now
-                schedule.next_run_at = compute_next_run_at(
-                    frequency=schedule.frequency,
-                    schedule_spec=schedule.schedule_spec or {},
-                    random_config=schedule.random_config or {},
-                    now=now,
-                )
+                if str(schedule.frequency or "").strip().lower() == "once":
+                    schedule.enabled = False
+                    schedule.next_run_at = None
+                else:
+                    schedule.next_run_at = compute_next_run_at(
+                        frequency=schedule.frequency,
+                        schedule_spec=schedule.schedule_spec or {},
+                        random_config=schedule.random_config or {},
+                        now=now,
+                    )
                 db.add(schedule)
                 db.commit()
                 continue
@@ -140,6 +145,11 @@ def _create_run_for_schedule(
     now: datetime,
 ) -> tuple[Run, list[uuid.UUID]]:
     accounts = _resolve_accounts(db, schedule.workspace_id, schedule.account_selector or {})
+    wanted_platform = str(strategy.platform_key or "").strip().lower()
+    if wanted_platform:
+        accounts = [a for a in accounts if str(a.platform_key or "").strip().lower() == wanted_platform]
+    if _should_shuffle_accounts(schedule.random_config or {}):
+        random.shuffle(accounts)
     limit = effective_parallel_limit(subscription, schedule_max_parallel=schedule.max_parallel)
     if len(accounts) > limit:
         accounts = accounts[:limit]
@@ -167,12 +177,16 @@ def _create_run_for_schedule(
         account_run_ids.append(ar.id)
 
     schedule.last_run_at = now
-    schedule.next_run_at = compute_next_run_at(
-        frequency=schedule.frequency,
-        schedule_spec=schedule.schedule_spec or {},
-        random_config=schedule.random_config or {},
-        now=now,
-    )
+    if str(schedule.frequency or "").strip().lower() == "once":
+        schedule.enabled = False
+        schedule.next_run_at = None
+    else:
+        schedule.next_run_at = compute_next_run_at(
+            frequency=schedule.frequency,
+            schedule_spec=schedule.schedule_spec or {},
+            random_config=schedule.random_config or {},
+            now=now,
+        )
     db.add(schedule)
     db.commit()
     db.refresh(run)
@@ -195,11 +209,31 @@ def _resolve_accounts(db, workspace_id, selector: dict) -> list[SocialAccount]:
                     SocialAccount.id.in_(parsed),
                 )
             ).all()
-            return rows
+            rows_by_id = {row.id: row for row in rows}
+            return [rows_by_id[account_id] for account_id in parsed if account_id in rows_by_id]
 
     if selector.get("all") is True:
-        return db.scalars(select(SocialAccount).where(SocialAccount.workspace_id == workspace_id)).all()
+        return (
+            db.scalars(
+                select(SocialAccount)
+                .where(SocialAccount.workspace_id == workspace_id, SocialAccount.status != "disabled")
+                .order_by(SocialAccount.created_at.asc())
+            )
+            .all()
+        )
 
     return db.scalars(
-        select(SocialAccount).where(SocialAccount.workspace_id == workspace_id, SocialAccount.status == "healthy")
+        select(SocialAccount)
+        .where(SocialAccount.workspace_id == workspace_id, SocialAccount.status == "healthy")
+        .order_by(SocialAccount.created_at.asc())
     ).all()
+
+
+def _should_shuffle_accounts(random_config: dict) -> bool:
+    if random_config.get("enabled") is False:
+        return False
+    if random_config.get("shuffle_accounts") is not None:
+        return bool(random_config.get("shuffle_accounts"))
+    if random_config.get("shuffle") is not None:
+        return bool(random_config.get("shuffle"))
+    return True

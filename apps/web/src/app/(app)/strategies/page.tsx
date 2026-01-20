@@ -1,24 +1,32 @@
 "use client";
 
 import { useAuth } from "@/lib/auth";
-import type { StrategyPublic } from "@/lib/types";
+import type { PlatformPublic, StrategyPublic } from "@/lib/types";
 import { useEffect, useMemo, useState } from "react";
 
 export default function StrategiesPage() {
   const auth = useAuth();
   const [strategies, setStrategies] = useState<StrategyPublic[]>([]);
+  const [platforms, setPlatforms] = useState<PlatformPublic[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const platformOptions = useMemo(
-    () => [
-      { value: "x", label: "X（Twitter）" },
-      { value: "reddit", label: "Reddit（预留）" },
-      { value: "facebook", label: "Facebook（预留）" },
-      { value: "instagram", label: "Instagram（预留）" },
-    ],
-    []
+    () =>
+      platforms.length
+        ? platforms.map((p) => ({ value: p.platform_key, label: p.display_name }))
+        : [
+            { value: "x", label: "X（Twitter）" },
+            { value: "reddit", label: "Reddit" },
+          ],
+    [platforms]
   );
+
+  const platformByKey = useMemo(() => {
+    const map: Record<string, PlatformPublic> = {};
+    for (const p of platforms) map[p.platform_key] = p;
+    return map;
+  }, [platforms]);
 
   const [name, setName] = useState("");
   const [platformKey, setPlatformKey] = useState("x");
@@ -64,6 +72,47 @@ export default function StrategiesPage() {
           max_actions: 1,
           bandwidth_mode: "eco",
         },
+      },
+      {
+        key: "x_publish_post",
+        label: "X：发布推文（文本/可选图片URL）",
+        platform_key: "x",
+        config: {
+          type: "x_publish_post",
+          text: "hello world",
+          media_urls: [],
+          max_actions: 1,
+          repeat_window_days: 1,
+          max_media_bytes: 153600,
+          max_download_bytes: 5242880,
+          compose_url: "https://x.com/compose/post",
+          bandwidth_mode: "balanced",
+        },
+      },
+      {
+        key: "reddit_upvote_targets",
+        label: "Reddit：Upvote（指定链接）",
+        platform_key: "reddit",
+        config: { type: "reddit_upvote", targets: ["https://www.reddit.com/r/test/comments/abcdef/title/"], max_actions: 1, bandwidth_mode: "eco" },
+      },
+      {
+        key: "reddit_comment_targets",
+        label: "Reddit：评论（指定链接）",
+        platform_key: "reddit",
+        config: {
+          type: "reddit_comment",
+          targets: ["https://www.reddit.com/r/test/comments/abcdef/title/"],
+          texts: ["感谢分享", "学习了", "很有启发"],
+          repeat_window_days: 7,
+          max_actions: 1,
+          bandwidth_mode: "eco",
+        },
+      },
+      {
+        key: "reddit_post",
+        label: "Reddit：发帖（subreddit）",
+        platform_key: "reddit",
+        config: { type: "reddit_post", subreddit: "test", title: "Hello", text: "First post", repeat_window_days: 7, max_actions: 1, bandwidth_mode: "eco" },
       },
       {
         key: "x_search_like",
@@ -123,6 +172,23 @@ export default function StrategiesPage() {
           quote_texts: ["收藏一下", "值得转发", "mark"],
           repeat_window_days: 7,
           bandwidth_mode: "eco",
+        },
+      },
+      {
+        key: "keyword_repost",
+        label: "X：关键词改写发布（keyword_repost，PromptStack + LLM 可选）",
+        platform_key: "x",
+        config: {
+          type: "keyword_repost",
+          query: "ai tools",
+          search_mode: "live",
+          max_candidates: 20,
+          scroll_limit: 6,
+          max_actions: 1,
+          repeat_window_days: 7,
+          keyword_repost_prompt_stack_key: "keyword_repost",
+          use_llm: true,
+          bandwidth_mode: "balanced",
         },
       },
       {
@@ -189,6 +255,21 @@ export default function StrategiesPage() {
     []
   );
 
+  function requiredCapabilitiesForType(type: string): string[] {
+    const t = type.trim().toLowerCase();
+    const caps: string[] = [];
+    if (t.startsWith("x_search_") || t.startsWith("x_verified_") || t === "keyword_repost" || t === "x_keyword_repost") {
+      caps.push("SOURCE_KEYWORD_SEARCH");
+    }
+    if (t.startsWith("x_verified_")) caps.push("TARGET_VERIFIED_ONLY");
+    if (t.includes("publish_post") || t === "reddit_post") caps.push("PUBLISH_POST");
+    if (t.includes("like") || t.includes("upvote")) caps.push("ENGAGE_LIKE");
+    if (t.includes("reply") || t.includes("comment")) caps.push("ENGAGE_COMMENT");
+    if (t.includes("repost") || t.includes("retweet")) caps.push("ENGAGE_REPOST");
+    if (t.includes("quote")) caps.push("ENGAGE_QUOTE");
+    return Array.from(new Set(caps));
+  }
+
   function applyTemplate(key: string) {
     const t = templates.find((it) => it.key === key);
     if (!t) return;
@@ -200,10 +281,18 @@ export default function StrategiesPage() {
     setLoading(true);
     setError(null);
     try {
-      const res = await auth.apiFetch("/strategies");
-      if (!res.ok) throw new Error(await res.text());
-      const data = (await res.json()) as StrategyPublic[];
+      const [strategiesRes, platformsRes] = await Promise.all([auth.apiFetch("/strategies"), auth.apiFetch("/platforms")]);
+      if (!strategiesRes.ok) throw new Error(await strategiesRes.text());
+      const data = (await strategiesRes.json()) as StrategyPublic[];
       setStrategies(data);
+
+      if (platformsRes.ok) {
+        const platformsData = (await platformsRes.json()) as PlatformPublic[];
+        setPlatforms(platformsData);
+        if (platformsData.length && !platformsData.some((p) => p.platform_key === platformKey)) {
+          setPlatformKey(platformsData[0].platform_key);
+        }
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : "加载失败");
     } finally {
@@ -263,6 +352,11 @@ export default function StrategiesPage() {
             </option>
           ))}
         </select>
+        {platformByKey[platformKey]?.capabilities?.length ? (
+          <div style={{ alignSelf: "center", opacity: 0.75, fontSize: 12 }}>
+            capabilities：{platformByKey[platformKey].capabilities.join(", ")}
+          </div>
+        ) : null}
         <select
           value={templateKey}
           onChange={(e) => {
@@ -273,11 +367,19 @@ export default function StrategiesPage() {
           style={{ padding: 10, borderRadius: 8, border: "1px solid #333" }}
         >
           <option value="">选择模板（可选）</option>
-          {templates.map((t) => (
-            <option key={t.key} value={t.key}>
-              {t.label}
-            </option>
-          ))}
+          {templates
+            .filter((t) => {
+              if (!platforms.length) return true;
+              const platform = platformByKey[t.platform_key];
+              if (!platform) return false;
+              const required = requiredCapabilitiesForType(String((t.config as Record<string, unknown>).type || ""));
+              return required.every((cap) => platform.capabilities.includes(cap));
+            })
+            .map((t) => (
+              <option key={t.key} value={t.key}>
+                {t.label}
+              </option>
+            ))}
         </select>
         <textarea
           value={configText}

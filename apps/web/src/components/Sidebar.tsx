@@ -9,6 +9,7 @@ const userNav: NavItem[] = [
   { href: "/", label: "仪表盘" },
   { href: "/social-accounts", label: "账号管理" },
   { href: "/proxies", label: "代理管理" },
+  { href: "/prompt-stacks", label: "提示词堆叠" },
   { href: "/strategies", label: "策略中心" },
   { href: "/schedules", label: "执行计划" },
   { href: "/runs", label: "运行记录" },
@@ -16,6 +17,7 @@ const userNav: NavItem[] = [
 const adminNav: NavItem[] = [
   { href: "/admin/users", label: "用户管理" },
   { href: "/admin/subscription", label: "订阅与配额" },
+  { href: "/admin/llm-config", label: "LLM 配置" },
   { href: "/admin/audit-logs", label: "审计日志" },
 ];
 

@@ -5,6 +5,7 @@ import random
 import re
 import tempfile
 import time
+from urllib.request import Request, urlopen
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
@@ -44,9 +45,7 @@ def execute_action(
     headless: bool,
 ) -> ExecuteActionResult:
     platform = platform_key.strip().lower()
-    action = action_type.strip().lower()
-
-    if platform != "x":
+    if platform not in {"x", "reddit"}:
         return ExecuteActionResult(
             status="failed",
             error_code="UNSUPPORTED_PLATFORM",
@@ -73,31 +72,14 @@ def execute_action(
             page.set_default_navigation_timeout(30_000)
 
             try:
-                res: ExecuteActionResult
-                if action in {"health_check", "x_health_check"}:
-                    res = _x_health_check(page)
-                elif action in {"proxy_check", "x_proxy_check"}:
-                    res = _x_proxy_check(page)
-                elif action in {"x_like", "like"}:
-                    res = _x_like(page, target_url=target_url, tweet_id=target_external_id)
-                elif action in {"x_repost", "x_retweet", "retweet", "repost"}:
-                    res = _x_repost(page, target_url=target_url, tweet_id=target_external_id)
-                elif action in {"x_search_collect", "search_collect"}:
-                    res = _x_search_collect(page, search_url=target_url, params=action_params or {})
-                elif action in {"x_reply", "reply", "comment", "x_comment"}:
-                    res = _x_reply(page, target_url=target_url, tweet_id=target_external_id, params=action_params or {})
-                elif action in {"x_quote", "quote"}:
-                    res = _x_quote(page, target_url=target_url, tweet_id=target_external_id, params=action_params or {})
-                else:
-                    res = ExecuteActionResult(
-                        status="failed",
-                        error_code="UNSUPPORTED_ACTION",
-                        message=f"Unsupported action_type: {action_type}",
-                        current_url=str(getattr(page, "url", "")) or None,
-                        screenshot_base64=_safe_screenshot(page),
-                        trace_base64=None,
-                        metadata=_failure_metadata(page),
-                    )
+                res = _execute_action_on_page(
+                    page,
+                    platform_key=platform_key,
+                    action_type=action_type,
+                    target_url=target_url,
+                    target_external_id=target_external_id,
+                    action_params=action_params or {},
+                )
                 res = _enrich_failure_result(res, page)
                 if res.status == "failed" and trace:
                     trace_base64 = _stop_trace_to_base64(trace, context)
@@ -163,7 +145,7 @@ def execute_actions_batch(
     headless: bool,
 ) -> list[ExecuteActionResult]:
     platform = platform_key.strip().lower()
-    if platform != "x":
+    if platform not in {"x", "reddit"}:
         return [
             ExecuteActionResult(
                 status="failed",
@@ -216,6 +198,7 @@ def execute_actions_batch(
                 try:
                     res = _execute_action_on_page(
                         page,
+                        platform_key=platform_key,
                         action_type=action_type,
                         target_url=target_url,
                         target_external_id=target_external_id,
@@ -416,30 +399,64 @@ def _classify_playwright_error(exc: PlaywrightError) -> str:
 def _execute_action_on_page(
     page: Any,
     *,
+    platform_key: str,
     action_type: str,
     target_url: str | None,
     target_external_id: str | None,
     action_params: dict[str, Any],
 ) -> ExecuteActionResult:
+    platform = str(platform_key or "").strip().lower()
     action = str(action_type).strip().lower()
-    if action in {"health_check", "x_health_check"}:
-        return _x_health_check(page)
-    if action in {"proxy_check", "x_proxy_check"}:
-        return _x_proxy_check(page)
-    if action in {"x_like", "like"}:
-        return _x_like(page, target_url=target_url, tweet_id=target_external_id)
-    if action in {"x_repost", "x_retweet", "retweet", "repost"}:
-        return _x_repost(page, target_url=target_url, tweet_id=target_external_id)
-    if action in {"x_search_collect", "search_collect"}:
-        return _x_search_collect(page, search_url=target_url, params=action_params)
-    if action in {"x_reply", "reply", "comment", "x_comment"}:
-        return _x_reply(page, target_url=target_url, tweet_id=target_external_id, params=action_params)
-    if action in {"x_quote", "quote"}:
-        return _x_quote(page, target_url=target_url, tweet_id=target_external_id, params=action_params)
+    if platform == "x":
+        if action in {"health_check", "x_health_check"}:
+            return _x_health_check(page)
+        if action in {"proxy_check", "x_proxy_check"}:
+            return _x_proxy_check(page)
+        if action in {"x_like", "like"}:
+            return _x_like(page, target_url=target_url, tweet_id=target_external_id)
+        if action in {"x_repost", "x_retweet", "retweet", "repost"}:
+            return _x_repost(page, target_url=target_url, tweet_id=target_external_id)
+        if action in {"x_search_collect", "search_collect"}:
+            return _x_search_collect(page, search_url=target_url, params=action_params)
+        if action in {"x_reply", "reply", "comment", "x_comment"}:
+            return _x_reply(page, target_url=target_url, tweet_id=target_external_id, params=action_params)
+        if action in {"x_quote", "quote"}:
+            return _x_quote(page, target_url=target_url, tweet_id=target_external_id, params=action_params)
+        if action in {"x_publish_post", "x_keyword_repost", "keyword_repost", "publish_post", "publish"}:
+            return _x_publish_post(page, params=action_params)
+        return ExecuteActionResult(
+            status="failed",
+            error_code="UNSUPPORTED_ACTION",
+            message=f"Unsupported action_type: {action_type}",
+            current_url=str(getattr(page, "url", "")) or None,
+            screenshot_base64=_safe_screenshot(page),
+            trace_base64=None,
+            metadata={},
+        )
+
+    if platform == "reddit":
+        if action in {"health_check", "reddit_health_check"}:
+            return _reddit_health_check(page)
+        if action in {"reddit_upvote", "upvote"}:
+            return _reddit_upvote(page, target_url=target_url)
+        if action in {"reddit_comment", "comment"}:
+            return _reddit_comment(page, target_url=target_url, params=action_params)
+        if action in {"reddit_post", "post"}:
+            return _reddit_post(page, params=action_params)
+        return ExecuteActionResult(
+            status="failed",
+            error_code="UNSUPPORTED_ACTION",
+            message=f"Unsupported action_type: {action_type}",
+            current_url=str(getattr(page, "url", "")) or None,
+            screenshot_base64=_safe_screenshot(page),
+            trace_base64=None,
+            metadata={},
+        )
+
     return ExecuteActionResult(
         status="failed",
-        error_code="UNSUPPORTED_ACTION",
-        message=f"Unsupported action_type: {action_type}",
+        error_code="UNSUPPORTED_PLATFORM",
+        message=f"Unsupported platform: {platform_key}",
         current_url=str(getattr(page, "url", "")) or None,
         screenshot_base64=_safe_screenshot(page),
         trace_base64=None,
@@ -537,10 +554,39 @@ def _x_search_collect(page: Any, *, search_url: str | None, params: dict[str, An
             if verified_only_dom and not is_verified:
                 continue
 
+            tweet_text = None
+            try:
+                tweet_text = article.locator("[data-testid='tweetText']").first.inner_text(timeout=200) or None
+            except Exception:
+                tweet_text = None
+            if isinstance(tweet_text, str):
+                tweet_text = tweet_text.strip().replace("\u2028", "\n").replace("\u2029", "\n")
+                if not tweet_text:
+                    tweet_text = None
+                elif len(tweet_text) > 2000:
+                    tweet_text = tweet_text[:2000].rstrip()
+
+            timestamp = None
+            try:
+                timestamp = article.locator("time").first.get_attribute("datetime")
+            except Exception:
+                timestamp = None
+
+            reply_count = _x_extract_metric_count(article, testid="reply")
+            repost_count = _x_extract_metric_count(article, testid="retweet")
+            like_count = _x_extract_metric_count(article, testid="like")
+            view_count = _x_extract_view_count(article)
+
             candidates_by_id[tweet_id] = {
                 "tweet_id": tweet_id,
                 "url": url,
                 "is_verified": is_verified,
+                "text": tweet_text,
+                "timestamp": timestamp,
+                "reply_count": reply_count,
+                "repost_count": repost_count,
+                "like_count": like_count,
+                "view_count": view_count,
             }
 
         if len(candidates_by_id) >= max_candidates:
@@ -573,7 +619,7 @@ def _x_search_collect(page: Any, *, search_url: str | None, params: dict[str, An
 
 
 def _extract_tweet_id_from_href(href: str) -> str | None:
-    m = re.search(r"/status/(?P<tweet_id>\\d+)", href)
+    m = re.search(r"/status/(?P<tweet_id>\d+)", href)
     if not m:
         return None
     return m.group("tweet_id")
@@ -586,6 +632,83 @@ def _normalize_x_url(href: str) -> str:
     if raw.startswith("/"):
         return f"https://x.com{raw}".split("?", 1)[0]
     return f"https://x.com/{raw}".split("?", 1)[0]
+
+
+def _parse_human_count(value: str) -> int | None:
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+
+    normalized = raw.replace(",", "").strip()
+    m = re.search(r"(?P<num>\d+(?:\.\d+)?)(?P<unit>[KMB])?", normalized, flags=re.IGNORECASE)
+    if not m:
+        return None
+
+    try:
+        base = float(m.group("num"))
+    except Exception:
+        return None
+
+    unit = (m.group("unit") or "").upper()
+    if unit == "K":
+        base *= 1_000
+    elif unit == "M":
+        base *= 1_000_000
+    elif unit == "B":
+        base *= 1_000_000_000
+
+    try:
+        return int(base)
+    except Exception:
+        return None
+
+
+def _x_extract_metric_count(article: Any, *, testid: str) -> int | None:
+    selectors = [
+        f"button[data-testid='{testid}']",
+        f"[data-testid='{testid}']",
+    ]
+    for sel in selectors:
+        try:
+            loc = article.locator(sel).first
+            if loc.count() <= 0:
+                continue
+            aria = loc.get_attribute("aria-label") or ""
+            parsed = _parse_human_count(aria)
+            if parsed is not None:
+                return parsed
+            txt = loc.inner_text(timeout=200) or ""
+            parsed = _parse_human_count(txt)
+            if parsed is not None:
+                return parsed
+        except Exception:
+            continue
+    return None
+
+
+def _x_extract_view_count(article: Any) -> int | None:
+    selectors = [
+        "[data-testid='analytics']",
+        "a[href*='/analytics']",
+        "a[aria-label*='view' i]",
+        "a[aria-label*='观看' i]",
+    ]
+    for sel in selectors:
+        try:
+            loc = article.locator(sel).first
+            if loc.count() <= 0:
+                continue
+            aria = loc.get_attribute("aria-label") or ""
+            parsed = _parse_human_count(aria)
+            if parsed is not None:
+                return parsed
+            txt = loc.inner_text(timeout=200) or ""
+            parsed = _parse_human_count(txt)
+            if parsed is not None:
+                return parsed
+        except Exception:
+            continue
+    return None
 
 
 def _get_int(source: dict[str, Any], key: str, *, default: int, min_value: int, max_value: int) -> int:
@@ -846,6 +969,26 @@ def _x_like(page: Any, *, target_url: str | None, tweet_id: str | None) -> Execu
             metadata={"already_liked": False},
         )
     except PlaywrightTimeoutError:
+        try:
+            page.reload(wait_until="domcontentloaded")
+            if tweet_id and str(tweet_id).strip():
+                refreshed_article = page.locator("article").filter(has=page.locator(f'a[href*=\"/status/{tweet_id}\"]')).first
+            else:
+                refreshed_article = page.locator("article").first
+            refreshed_article.wait_for(state="visible", timeout=10_000)
+            if refreshed_article.locator('button[data-testid="unlike"]').count() > 0:
+                return ExecuteActionResult(
+                    status="succeeded",
+                    error_code=None,
+                    message=None,
+                    current_url=str(page.url),
+                    screenshot_base64=None,
+                    trace_base64=None,
+                    metadata={"already_liked": False, "confirmed_after_reload": True},
+                )
+        except Exception:
+            pass
+
         screenshot = _safe_screenshot(page)
         return ExecuteActionResult(
             status="failed",
@@ -1227,6 +1370,799 @@ def _x_quote(page: Any, *, target_url: str | None, tweet_id: str | None, params:
     )
 
 
+def _x_publish_post(page: Any, *, params: dict[str, Any]) -> ExecuteActionResult:
+    text = str(params.get("text") or "").strip()
+
+    raw_media_urls = params.get("media_urls") or params.get("media") or []
+    media_urls: list[str] = []
+    if isinstance(raw_media_urls, list):
+        for item in raw_media_urls:
+            url = str(item or "").strip()
+            if url:
+                media_urls.append(url)
+    if len(media_urls) > 4:
+        media_urls = media_urls[:4]
+
+    if not text and not media_urls:
+        return ExecuteActionResult(
+            status="failed",
+            error_code="INVALID_PARAMS",
+            message="action_params.text or action_params.media_urls is required for x_publish_post",
+            current_url=None,
+            screenshot_base64=None,
+            metadata={},
+        )
+
+    max_media_bytes = _get_int(params, "max_media_bytes", default=150 * 1024, min_value=10 * 1024, max_value=5 * 1024 * 1024)
+    max_download_bytes = _get_int(params, "max_download_bytes", default=5 * 1024 * 1024, min_value=100 * 1024, max_value=20 * 1024 * 1024)
+    compose_url = str(params.get("compose_url") or "https://x.com/compose/post").strip()
+
+    page.goto(compose_url, wait_until="domcontentloaded")
+
+    risk = _x_detect_risk(page)
+    if risk is not None:
+        screenshot = _safe_screenshot(page)
+        return ExecuteActionResult(
+            status="failed",
+            error_code=risk,
+            message="Risk challenge detected",
+            current_url=str(page.url),
+            screenshot_base64=screenshot,
+            metadata={"risk": risk},
+        )
+
+    if not _x_is_logged_in(page):
+        screenshot = _safe_screenshot(page)
+        return ExecuteActionResult(
+            status="failed",
+            error_code="AUTH_REQUIRED",
+            message="Not logged in",
+            current_url=str(page.url),
+            screenshot_base64=screenshot,
+            metadata={"logged_in": False},
+        )
+
+    textarea = _find_visible_locator(
+        page,
+        [
+            "[data-testid='tweetTextarea_0']",
+            "div[role='textbox'][contenteditable='true']",
+        ],
+        timeout_ms=20_000,
+    )
+    if textarea is None:
+        screenshot = _safe_screenshot(page)
+        return ExecuteActionResult(
+            status="failed",
+            error_code="UI_SELECTOR_CHANGED",
+            message="Compose textarea not found",
+            current_url=str(page.url),
+            screenshot_base64=screenshot,
+            metadata={},
+        )
+
+    try:
+        textarea.click(timeout=5_000)
+        if text:
+            _x_type_text(page, text)
+    except PlaywrightTimeoutError:
+        screenshot = _safe_screenshot(page)
+        return ExecuteActionResult(
+            status="failed",
+            error_code="UI_INTERCEPTED",
+            message="Cannot type post text",
+            current_url=str(page.url),
+            screenshot_base64=screenshot,
+            metadata={},
+        )
+
+    if media_urls:
+        with tempfile.TemporaryDirectory(prefix="syncsocial_x_media_") as tmpdir:
+            file_paths: list[str] = []
+            try:
+                for idx, url in enumerate(media_urls):
+                    raw_bytes, content_type = _download_bytes(url, max_bytes=max_download_bytes)
+                    payload, ext = _shrink_image_if_needed(
+                        raw_bytes,
+                        url=url,
+                        content_type=content_type,
+                        max_bytes=max_media_bytes,
+                    )
+                    path = f"{tmpdir}/upload_{idx}{ext}"
+                    with open(path, "wb") as f:
+                        f.write(payload)
+                    file_paths.append(path)
+            except ValueError as exc:
+                screenshot = _safe_screenshot(page)
+                return ExecuteActionResult(
+                    status="failed",
+                    error_code=str(exc) or "MEDIA_DOWNLOAD_FAILED",
+                    message="Failed to download or preprocess media",
+                    current_url=str(page.url),
+                    screenshot_base64=screenshot,
+                    metadata={"media_urls": media_urls},
+                )
+            except Exception as exc:
+                screenshot = _safe_screenshot(page)
+                return ExecuteActionResult(
+                    status="failed",
+                    error_code="MEDIA_DOWNLOAD_FAILED",
+                    message=str(exc),
+                    current_url=str(page.url),
+                    screenshot_base64=screenshot,
+                    metadata={"media_urls": media_urls},
+                )
+
+            file_input = _find_visible_locator(
+                page,
+                [
+                    "input[type='file'][data-testid='fileInput']",
+                    "input[type='file'][accept*='image']",
+                    "input[type='file']",
+                ],
+                timeout_ms=12_000,
+            )
+            if file_input is None:
+                screenshot = _safe_screenshot(page)
+                return ExecuteActionResult(
+                    status="failed",
+                    error_code="UI_SELECTOR_CHANGED",
+                    message="Media file input not found",
+                    current_url=str(page.url),
+                    screenshot_base64=screenshot,
+                    metadata={},
+                )
+
+            try:
+                file_input.set_input_files(file_paths)
+            except Exception as exc:
+                screenshot = _safe_screenshot(page)
+                return ExecuteActionResult(
+                    status="failed",
+                    error_code="MEDIA_UPLOAD_FAILED",
+                    message=str(exc),
+                    current_url=str(page.url),
+                    screenshot_base64=screenshot,
+                    metadata={},
+                )
+
+            if not _x_wait_for_media_attachments(page, expected_count=len(file_paths), timeout_ms=20_000):
+                screenshot = _safe_screenshot(page)
+                return ExecuteActionResult(
+                    status="failed",
+                    error_code="MEDIA_UPLOAD_FAILED",
+                    message="Media attachments not detected after upload",
+                    current_url=str(page.url),
+                    screenshot_base64=screenshot,
+                    metadata={},
+                )
+
+    try:
+        post_button = page.locator("[data-testid='tweetButton'], [data-testid='tweetButtonInline']").first
+        post_button.wait_for(state="visible", timeout=12_000)
+        _wait_for_enabled(page, post_button, timeout_ms=7_000)
+        post_button.click(timeout=5_000)
+    except PlaywrightTimeoutError:
+        screenshot = _safe_screenshot(page)
+        return ExecuteActionResult(
+            status="failed",
+            error_code="UI_INTERCEPTED",
+            message="Post submit not clickable",
+            current_url=str(page.url),
+            screenshot_base64=screenshot,
+            metadata={},
+        )
+    except PlaywrightError as exc:
+        screenshot = _safe_screenshot(page)
+        return ExecuteActionResult(
+            status="failed",
+            error_code="BROWSER_ERROR",
+            message=str(exc),
+            current_url=str(page.url),
+            screenshot_base64=screenshot,
+            metadata={},
+        )
+
+    success = _x_wait_for_post_success(page, timeout_ms=20_000)
+    if not success:
+        risk = _x_detect_risk(page)
+        screenshot = _safe_screenshot(page)
+        return ExecuteActionResult(
+            status="failed",
+            error_code=risk or "POST_VALIDATION_FAILED",
+            message="Post not confirmed",
+            current_url=str(page.url),
+            screenshot_base64=screenshot,
+            metadata={},
+        )
+
+    return ExecuteActionResult(
+        status="succeeded",
+        error_code=None,
+        message=None,
+        current_url=str(page.url),
+        screenshot_base64=None,
+        metadata=success,
+    )
+
+
+def _download_bytes(url: str, *, max_bytes: int) -> tuple[bytes, str]:
+    req = Request(url, headers={"User-Agent": "Mozilla/5.0"})
+    with urlopen(req, timeout=30) as resp:
+        content_type = str(resp.headers.get("Content-Type") or "")
+        data = resp.read(max_bytes + 1)
+    if len(data) > max_bytes:
+        raise ValueError("MEDIA_TOO_LARGE")
+    return data, content_type
+
+
+def _guess_media_ext(*, url: str, content_type: str) -> str:
+    ct = content_type.lower()
+    if "image/jpeg" in ct:
+        return ".jpg"
+    if "image/png" in ct:
+        return ".png"
+    if "image/gif" in ct:
+        return ".gif"
+    if "image/webp" in ct:
+        return ".webp"
+    lowered = url.lower()
+    m = re.search(r"\\.(jpg|jpeg|png|gif|webp)(?:\\?|#|$)", lowered)
+    if m:
+        ext = m.group(1)
+        if ext == "jpeg":
+            ext = "jpg"
+        return f".{ext}"
+    return ".jpg"
+
+
+def _shrink_image_if_needed(payload: bytes, *, url: str, content_type: str, max_bytes: int) -> tuple[bytes, str]:
+    ext = _guess_media_ext(url=url, content_type=content_type)
+    if len(payload) <= max_bytes:
+        return payload, ext
+
+    try:
+        import io
+
+        from PIL import Image
+    except Exception:
+        return payload, ext
+
+    try:
+        img = Image.open(io.BytesIO(payload))
+        img.load()
+    except Exception:
+        return payload, ext
+
+    img = img.convert("RGB")
+    for quality in [85, 75, 65, 55, 45, 35]:
+        buf = io.BytesIO()
+        try:
+            img.save(buf, format="JPEG", quality=quality, optimize=True)
+        except Exception:
+            continue
+        out = buf.getvalue()
+        if len(out) <= max_bytes:
+            return out, ".jpg"
+
+    # If still too large, downscale and retry a couple times.
+    for scale in [0.85, 0.7, 0.55]:
+        try:
+            resized = img.resize((max(1, int(img.width * scale)), max(1, int(img.height * scale))))
+        except Exception:
+            continue
+        for quality in [70, 55, 40]:
+            buf = io.BytesIO()
+            try:
+                resized.save(buf, format="JPEG", quality=quality, optimize=True)
+            except Exception:
+                continue
+            out = buf.getvalue()
+            if len(out) <= max_bytes:
+                return out, ".jpg"
+
+    return payload, ext
+
+
+def _x_wait_for_media_attachments(page: Any, *, expected_count: int, timeout_ms: int) -> bool:
+    if expected_count <= 0:
+        return True
+    deadline = time.monotonic() + timeout_ms / 1000.0
+    selectors = [
+        "[data-testid='attachments'] img",
+        "[data-testid='attachments'] video",
+        "[data-testid='attachments'] [role='img']",
+        "div[aria-label*='Remove']",
+    ]
+    while time.monotonic() < deadline:
+        try:
+            for sel in selectors:
+                if page.locator(sel).count() >= expected_count:
+                    return True
+        except Exception:
+            pass
+        page.wait_for_timeout(300)
+    return False
+
+
+def _x_wait_for_post_success(page: Any, *, timeout_ms: int) -> dict[str, Any] | None:
+    deadline = time.monotonic() + timeout_ms / 1000.0
+    while time.monotonic() < deadline:
+        url = str(getattr(page, "url", "") or "")
+        m = re.search(r"/status/(?P<tweet_id>\d+)", url)
+        if m:
+            tweet_id = m.group("tweet_id")
+            return {"tweet_id": tweet_id, "tweet_url": url.split("?", 1)[0]}
+
+        try:
+            toast = page.locator("[data-testid='toast']").first
+            if toast.count() > 0:
+                text = toast.inner_text(timeout=500) or ""
+                if re.search(r"sent|posted|已发送|已发布|发送成功", text, flags=re.IGNORECASE):
+                    return {"tweet_id": None, "tweet_url": None, "toast": text.strip()[:200]}
+        except Exception:
+            pass
+
+        page.wait_for_timeout(300)
+    return None
+
+
+def _normalize_reddit_url(url: str) -> str:
+    raw = str(url or "").strip()
+    if not raw:
+        return raw
+
+    if raw.startswith("/"):
+        raw = f"https://www.reddit.com{raw}"
+
+    normalized = re.sub(r"^https?://(www\\.)?reddit\\.com", "https://old.reddit.com", raw, flags=re.IGNORECASE)
+    normalized = re.sub(r"^https?://old\\.reddit\\.com", "https://old.reddit.com", normalized, flags=re.IGNORECASE)
+    normalized = normalized.split("#", 1)[0].split("?", 1)[0]
+    return normalized
+
+
+def _reddit_detect_risk(page: Any) -> str | None:
+    url = str(getattr(page, "url", "") or "")
+    lowered = url.lower()
+    if "captcha" in lowered or "/captcha" in lowered:
+        return "CAPTCHA_REQUIRED"
+
+    try:
+        if page.locator("text=/verify you are human|captcha|unusual activity|suspicious activity/i").count() > 0:
+            return "CAPTCHA_REQUIRED"
+    except Exception:
+        pass
+
+    try:
+        if page.locator("text=/you are doing that too much|try again later/i").count() > 0:
+            return "RATE_LIMITED"
+    except Exception:
+        pass
+
+    return None
+
+
+def _reddit_is_logged_in_old(page: Any) -> bool:
+    try:
+        if page.locator("#header-bottom-right a.logout, a[href*='logout']").count() > 0:
+            return True
+    except Exception:
+        pass
+    try:
+        if page.locator("form#login_login-main, form#login_login, input[name='user'], input[name='passwd']").count() > 0:
+            return False
+    except Exception:
+        pass
+    return False
+
+
+def _reddit_health_check(page: Any) -> ExecuteActionResult:
+    page.goto("https://old.reddit.com", wait_until="domcontentloaded")
+    risk = _reddit_detect_risk(page)
+    if risk is not None:
+        screenshot = _safe_screenshot(page)
+        return ExecuteActionResult(
+            status="failed",
+            error_code=risk,
+            message="Risk challenge detected",
+            current_url=str(page.url),
+            screenshot_base64=screenshot,
+            metadata={"risk": risk},
+        )
+    logged_in = _reddit_is_logged_in_old(page)
+    if logged_in:
+        return ExecuteActionResult(
+            status="succeeded",
+            error_code=None,
+            message=None,
+            current_url=str(page.url),
+            screenshot_base64=None,
+            metadata={},
+        )
+    screenshot = _safe_screenshot(page)
+    return ExecuteActionResult(
+        status="failed",
+        error_code="AUTH_REQUIRED",
+        message="Not logged in",
+        current_url=str(page.url),
+        screenshot_base64=screenshot,
+        metadata={"logged_in": False},
+    )
+
+
+def _reddit_upvote(page: Any, *, target_url: str | None) -> ExecuteActionResult:
+    if target_url is None or not str(target_url).strip():
+        return ExecuteActionResult(
+            status="failed",
+            error_code="INVALID_TARGET",
+            message="target_url is required for reddit_upvote",
+            current_url=None,
+            screenshot_base64=None,
+            metadata={},
+        )
+
+    url = _normalize_reddit_url(str(target_url))
+    page.goto(url, wait_until="domcontentloaded")
+
+    risk = _reddit_detect_risk(page)
+    if risk is not None:
+        screenshot = _safe_screenshot(page)
+        return ExecuteActionResult(
+            status="failed",
+            error_code=risk,
+            message="Risk challenge detected",
+            current_url=str(page.url),
+            screenshot_base64=screenshot,
+            metadata={"risk": risk},
+        )
+
+    if not _reddit_is_logged_in_old(page):
+        screenshot = _safe_screenshot(page)
+        return ExecuteActionResult(
+            status="failed",
+            error_code="AUTH_REQUIRED",
+            message="Not logged in",
+            current_url=str(page.url),
+            screenshot_base64=screenshot,
+            metadata={"logged_in": False},
+        )
+
+    try:
+        thing = page.locator("div#siteTable .thing").first
+        thing.wait_for(state="visible", timeout=10_000)
+    except PlaywrightTimeoutError:
+        screenshot = _safe_screenshot(page)
+        return ExecuteActionResult(
+            status="failed",
+            error_code="UI_SELECTOR_CHANGED",
+            message="Content not found",
+            current_url=str(page.url),
+            screenshot_base64=screenshot,
+            metadata={},
+        )
+
+    if thing.locator("div.arrow.upmod").count() > 0:
+        return ExecuteActionResult(
+            status="skipped",
+            error_code=None,
+            message="Already upvoted",
+            current_url=str(page.url),
+            screenshot_base64=None,
+            metadata={"already_upvoted": True},
+        )
+
+    try:
+        up = thing.locator("div.arrow.up").first
+        up.wait_for(state="visible", timeout=5_000)
+        up.scroll_into_view_if_needed(timeout=3_000)
+        up.click(timeout=5_000)
+    except PlaywrightTimeoutError:
+        screenshot = _safe_screenshot(page)
+        return ExecuteActionResult(
+            status="failed",
+            error_code="UI_INTERCEPTED",
+            message="Upvote button not clickable",
+            current_url=str(page.url),
+            screenshot_base64=screenshot,
+            metadata={},
+        )
+    except PlaywrightError as exc:
+        screenshot = _safe_screenshot(page)
+        return ExecuteActionResult(
+            status="failed",
+            error_code="BROWSER_ERROR",
+            message=str(exc),
+            current_url=str(page.url),
+            screenshot_base64=screenshot,
+            metadata={},
+        )
+
+    try:
+        thing.locator("div.arrow.upmod").first.wait_for(state="visible", timeout=5_000)
+        return ExecuteActionResult(
+            status="succeeded",
+            error_code=None,
+            message=None,
+            current_url=str(page.url),
+            screenshot_base64=None,
+            metadata={"already_upvoted": False},
+        )
+    except PlaywrightTimeoutError:
+        screenshot = _safe_screenshot(page)
+        return ExecuteActionResult(
+            status="failed",
+            error_code="POST_VALIDATION_FAILED",
+            message="Upvote not confirmed (upmod not visible)",
+            current_url=str(page.url),
+            screenshot_base64=screenshot,
+            metadata={},
+        )
+
+
+def _reddit_comment(page: Any, *, target_url: str | None, params: dict[str, Any]) -> ExecuteActionResult:
+    if target_url is None or not str(target_url).strip():
+        return ExecuteActionResult(
+            status="failed",
+            error_code="INVALID_TARGET",
+            message="target_url is required for reddit_comment",
+            current_url=None,
+            screenshot_base64=None,
+            metadata={},
+        )
+
+    text = str(params.get("text") or "").strip()
+    if not text:
+        return ExecuteActionResult(
+            status="failed",
+            error_code="INVALID_PARAMS",
+            message="action_params.text is required for reddit_comment",
+            current_url=None,
+            screenshot_base64=None,
+            metadata={},
+        )
+
+    url = _normalize_reddit_url(str(target_url))
+    page.goto(url, wait_until="domcontentloaded")
+
+    risk = _reddit_detect_risk(page)
+    if risk is not None:
+        screenshot = _safe_screenshot(page)
+        return ExecuteActionResult(
+            status="failed",
+            error_code=risk,
+            message="Risk challenge detected",
+            current_url=str(page.url),
+            screenshot_base64=screenshot,
+            metadata={"risk": risk},
+        )
+
+    if not _reddit_is_logged_in_old(page):
+        screenshot = _safe_screenshot(page)
+        return ExecuteActionResult(
+            status="failed",
+            error_code="AUTH_REQUIRED",
+            message="Not logged in",
+            current_url=str(page.url),
+            screenshot_base64=screenshot,
+            metadata={"logged_in": False},
+        )
+
+    textarea = _find_visible_locator(
+        page,
+        [
+            "textarea[name='text']",
+            "form.usertext textarea",
+        ],
+        timeout_ms=15_000,
+    )
+    if textarea is None:
+        screenshot = _safe_screenshot(page)
+        return ExecuteActionResult(
+            status="failed",
+            error_code="UI_SELECTOR_CHANGED",
+            message="Comment textarea not found",
+            current_url=str(page.url),
+            screenshot_base64=screenshot,
+            metadata={},
+        )
+
+    try:
+        textarea.click(timeout=3_000)
+        _x_type_text(page, text)
+    except Exception as exc:
+        screenshot = _safe_screenshot(page)
+        return ExecuteActionResult(
+            status="failed",
+            error_code="UI_INTERCEPTED",
+            message=str(exc),
+            current_url=str(page.url),
+            screenshot_base64=screenshot,
+            metadata={},
+        )
+
+    submit = _find_visible_locator(
+        page,
+        [
+            "form.usertext button[type='submit']",
+            "form.usertext button.save",
+        ],
+        timeout_ms=8_000,
+    )
+    if submit is None:
+        screenshot = _safe_screenshot(page)
+        return ExecuteActionResult(
+            status="failed",
+            error_code="UI_SELECTOR_CHANGED",
+            message="Comment submit button not found",
+            current_url=str(page.url),
+            screenshot_base64=screenshot,
+            metadata={},
+        )
+
+    try:
+        submit.click(timeout=5_000)
+        page.wait_for_timeout(random.randint(900, 1400))
+    except Exception as exc:
+        screenshot = _safe_screenshot(page)
+        return ExecuteActionResult(
+            status="failed",
+            error_code="UI_INTERCEPTED",
+            message=str(exc),
+            current_url=str(page.url),
+            screenshot_base64=screenshot,
+            metadata={},
+        )
+
+    # Best-effort confirmation: detect common error messages.
+    try:
+        if page.locator(".error, .status.error, div.error").count() > 0:
+            screenshot = _safe_screenshot(page)
+            return ExecuteActionResult(
+                status="failed",
+                error_code="POST_VALIDATION_FAILED",
+                message="Comment may have failed (error indicator visible)",
+                current_url=str(page.url),
+                screenshot_base64=screenshot,
+                metadata={},
+            )
+    except Exception:
+        pass
+
+    return ExecuteActionResult(
+        status="succeeded",
+        error_code=None,
+        message=None,
+        current_url=str(page.url),
+        screenshot_base64=None,
+        metadata={},
+    )
+
+
+def _reddit_post(page: Any, *, params: dict[str, Any]) -> ExecuteActionResult:
+    subreddit = str(params.get("subreddit") or "").strip().lstrip("r/").strip("/")
+    title = str(params.get("title") or "").strip()
+    text = str(params.get("text") or params.get("body") or "").strip()
+    if not subreddit or not title:
+        return ExecuteActionResult(
+            status="failed",
+            error_code="INVALID_PARAMS",
+            message="action_params.subreddit and action_params.title are required for reddit_post",
+            current_url=None,
+            screenshot_base64=None,
+            metadata={},
+        )
+
+    submit_url = f"https://old.reddit.com/r/{subreddit}/submit"
+    page.goto(submit_url, wait_until="domcontentloaded")
+
+    risk = _reddit_detect_risk(page)
+    if risk is not None:
+        screenshot = _safe_screenshot(page)
+        return ExecuteActionResult(
+            status="failed",
+            error_code=risk,
+            message="Risk challenge detected",
+            current_url=str(page.url),
+            screenshot_base64=screenshot,
+            metadata={"risk": risk},
+        )
+
+    if not _reddit_is_logged_in_old(page):
+        screenshot = _safe_screenshot(page)
+        return ExecuteActionResult(
+            status="failed",
+            error_code="AUTH_REQUIRED",
+            message="Not logged in",
+            current_url=str(page.url),
+            screenshot_base64=screenshot,
+            metadata={"logged_in": False},
+        )
+
+    title_input = _find_visible_locator(page, ["textarea[name='title']", "input[name='title']"], timeout_ms=12_000)
+    if title_input is None:
+        screenshot = _safe_screenshot(page)
+        return ExecuteActionResult(
+            status="failed",
+            error_code="UI_SELECTOR_CHANGED",
+            message="Post title input not found",
+            current_url=str(page.url),
+            screenshot_base64=screenshot,
+            metadata={},
+        )
+
+    try:
+        title_input.click(timeout=3_000)
+        _x_type_text(page, title)
+    except Exception as exc:
+        screenshot = _safe_screenshot(page)
+        return ExecuteActionResult(
+            status="failed",
+            error_code="UI_INTERCEPTED",
+            message=str(exc),
+            current_url=str(page.url),
+            screenshot_base64=screenshot,
+            metadata={},
+        )
+
+    if text:
+        body_input = _find_visible_locator(page, ["textarea[name='text']", "form.usertext textarea"], timeout_ms=12_000)
+        if body_input is not None:
+            try:
+                body_input.click(timeout=3_000)
+                _x_type_text(page, text)
+            except Exception:
+                pass
+
+    submit = _find_visible_locator(page, ["button[type='submit']", "button:has-text('submit')"], timeout_ms=10_000)
+    if submit is None:
+        screenshot = _safe_screenshot(page)
+        return ExecuteActionResult(
+            status="failed",
+            error_code="UI_SELECTOR_CHANGED",
+            message="Post submit button not found",
+            current_url=str(page.url),
+            screenshot_base64=screenshot,
+            metadata={},
+        )
+
+    try:
+        submit.click(timeout=5_000)
+    except Exception as exc:
+        screenshot = _safe_screenshot(page)
+        return ExecuteActionResult(
+            status="failed",
+            error_code="UI_INTERCEPTED",
+            message=str(exc),
+            current_url=str(page.url),
+            screenshot_base64=screenshot,
+            metadata={},
+        )
+
+    # Best-effort: successful submission usually lands on /comments/.
+    deadline = time.monotonic() + 20.0
+    while time.monotonic() < deadline:
+        if "/comments/" in str(getattr(page, "url", "") or ""):
+            return ExecuteActionResult(
+                status="succeeded",
+                error_code=None,
+                message=None,
+                current_url=str(page.url),
+                screenshot_base64=None,
+                metadata={},
+            )
+        page.wait_for_timeout(300)
+
+    screenshot = _safe_screenshot(page)
+    return ExecuteActionResult(
+        status="failed",
+        error_code="POST_VALIDATION_FAILED",
+        message="Post not confirmed",
+        current_url=str(page.url),
+        screenshot_base64=screenshot,
+        metadata={},
+    )
+
+
 def _x_has_reply_restriction(page: Any) -> bool:
     try:
         loc = page.locator("text=/Who can reply|who can reply|Mentioned|mentioned|谁可以回复/").first
@@ -1423,6 +2359,25 @@ def _x_repost(page: Any, *, target_url: str | None, tweet_id: str | None) -> Exe
             metadata={"already_reposted": False},
         )
     except PlaywrightTimeoutError:
+        try:
+            page.reload(wait_until="domcontentloaded")
+            if tweet_id and str(tweet_id).strip():
+                refreshed_article = page.locator("article").filter(has=page.locator(f'a[href*=\"/status/{tweet_id}\"]')).first
+            else:
+                refreshed_article = page.locator("article").first
+            refreshed_article.wait_for(state="visible", timeout=10_000)
+            if refreshed_article.locator('button[data-testid="unretweet"]').count() > 0:
+                return ExecuteActionResult(
+                    status="succeeded",
+                    error_code=None,
+                    message=None,
+                    current_url=str(page.url),
+                    screenshot_base64=None,
+                    metadata={"already_reposted": False, "confirmed_after_reload": True},
+                )
+        except Exception:
+            pass
+
         screenshot = _safe_screenshot(page)
         return ExecuteActionResult(
             status="failed",

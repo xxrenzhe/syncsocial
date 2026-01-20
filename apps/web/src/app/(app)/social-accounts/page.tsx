@@ -1,7 +1,7 @@
 "use client";
 
 import { useAuth } from "@/lib/auth";
-import type { LoginSessionPublic, ProxyPoolPublic, SocialAccountPublic } from "@/lib/types";
+import type { LoginSessionPublic, PlatformPublic, ProxyPoolPublic, SocialAccountPublic } from "@/lib/types";
 import { useEffect, useMemo, useRef, useState } from "react";
 
 type SessionState = { session: LoginSessionPublic; loading: boolean; error: string | null };
@@ -9,6 +9,7 @@ type SessionState = { session: LoginSessionPublic; loading: boolean; error: stri
 export default function SocialAccountsPage() {
   const auth = useAuth();
   const [accounts, setAccounts] = useState<SocialAccountPublic[]>([]);
+  const [platforms, setPlatforms] = useState<PlatformPublic[]>([]);
   const [proxyPools, setProxyPools] = useState<ProxyPoolPublic[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -16,13 +17,14 @@ export default function SocialAccountsPage() {
   const mountedRef = useRef(true);
 
   const platformOptions = useMemo(
-    () => [
-      { value: "x", label: "X（Twitter）" },
-      { value: "reddit", label: "Reddit（预留）" },
-      { value: "facebook", label: "Facebook（预留）" },
-      { value: "instagram", label: "Instagram（预留）" },
-    ],
-    []
+    () =>
+      platforms.length
+        ? platforms.map((p) => ({ value: p.platform_key, label: p.display_name }))
+        : [
+            { value: "x", label: "X（Twitter）" },
+            { value: "reddit", label: "Reddit" },
+          ],
+    [platforms]
   );
 
   const [platformKey, setPlatformKey] = useState("x");
@@ -34,13 +36,25 @@ export default function SocialAccountsPage() {
     setLoading(true);
     setError(null);
     try {
-      const [aRes, pRes] = await Promise.all([auth.apiFetch("/social-accounts"), auth.apiFetch("/proxy-pools")]);
+      const [aRes, pRes, platformsRes] = await Promise.all([
+        auth.apiFetch("/social-accounts"),
+        auth.apiFetch("/proxy-pools"),
+        auth.apiFetch("/platforms"),
+      ]);
       if (!aRes.ok) throw new Error(await aRes.text());
       if (!pRes.ok) throw new Error(await pRes.text());
       const aData = (await aRes.json()) as SocialAccountPublic[];
       const pData = (await pRes.json()) as ProxyPoolPublic[];
       setAccounts(aData);
       setProxyPools(pData);
+
+      if (platformsRes.ok) {
+        const platformsData = (await platformsRes.json()) as PlatformPublic[];
+        setPlatforms(platformsData);
+        if (platformsData.length && !platformsData.some((p) => p.platform_key === platformKey)) {
+          setPlatformKey(platformsData[0].platform_key);
+        }
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : "加载失败");
     } finally {
@@ -246,10 +260,11 @@ export default function SocialAccountsPage() {
               : a.proxy_pool_id
                 ? a.proxy_pool_id
                 : "—";
+          const platformLabel = platforms.find((p) => p.platform_key === a.platform_key)?.display_name || a.platform_key;
           return (
             <div key={a.id} style={{ border: "1px solid #222", borderRadius: 12, padding: 14 }}>
               <div style={{ display: "flex", gap: 12, alignItems: "center", flexWrap: "wrap" }}>
-                <div style={{ fontWeight: 700 }}>{a.platform_key}</div>
+                <div style={{ fontWeight: 700 }}>{platformLabel}</div>
                 <div style={{ opacity: 0.8 }}>{a.handle || a.display_name || "—"}</div>
                 <div style={{ marginLeft: "auto", opacity: 0.7 }}>状态：{a.status}</div>
               </div>

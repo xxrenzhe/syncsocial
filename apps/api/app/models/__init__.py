@@ -14,6 +14,8 @@ from app.models.user import User
 from app.models.workspace import Workspace
 from app.models.proxy_pool import ProxyPool
 from app.models.proxy import Proxy
+from app.models.prompt_stack import PromptStack
+from app.models.llm_config import WorkspaceLlmConfig
 
 __all__ = [
     "AccountRun",
@@ -33,4 +35,6 @@ __all__ = [
     "Workspace",
     "ProxyPool",
     "Proxy",
+    "PromptStack",
+    "WorkspaceLlmConfig",
 ]

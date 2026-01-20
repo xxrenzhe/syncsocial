@@ -74,6 +74,24 @@ export type AdminSubscriptionOverview = {
   active_reason: string | null;
 };
 
+export type WorkspaceLlmConfigPublic = {
+  id: string;
+  workspace_id: string;
+  provider: string;
+  base_url: string | null;
+  model: string | null;
+  has_api_key: boolean;
+  created_at: string;
+  updated_at: string;
+};
+
+export type PlatformPublic = {
+  platform_key: string;
+  display_name: string;
+  login_url: string;
+  capabilities: string[];
+};
+
 export type AuditLogPublic = {
   id: string;
   workspace_id: string;
@@ -120,6 +138,16 @@ export type StrategyPublic = {
   platform_key: string;
   version: number;
   config: Record<string, unknown>;
+  created_at: string;
+  updated_at: string;
+};
+
+export type PromptStackPublic = {
+  id: string;
+  workspace_id: string;
+  key: string;
+  version: number;
+  payload: Record<string, unknown>;
   created_at: string;
   updated_at: string;
 };
