@@ -251,6 +251,81 @@ export default function StrategiesPage() {
           bandwidth_mode: "eco",
         },
       },
+      {
+        key: "original_posts_generated",
+        label: "X：原创发推（original_posts，PromptStack + LLM 可选）",
+        platform_key: "x",
+        config: {
+          type: "original_posts",
+          prompt_stack_key: "original_post",
+          use_llm: true,
+          max_actions: 1,
+          repeat_window_days: 1,
+          bandwidth_mode: "balanced",
+        },
+      },
+      {
+        key: "x_competitor_like",
+        label: "X：竞争对手主页→点赞",
+        platform_key: "x",
+        config: {
+          type: "x_competitor_like",
+          competitor_handles: ["username1", "username2"],
+          max_candidates: 30,
+          scroll_limit: 6,
+          max_actions: 3,
+          recency_hours: 72,
+          bandwidth_mode: "eco",
+        },
+      },
+      {
+        key: "x_competitor_reply",
+        label: "X：竞争对手主页→评论/回复",
+        platform_key: "x",
+        config: {
+          type: "x_competitor_reply",
+          competitor_handles: ["username1", "username2"],
+          max_candidates: 20,
+          scroll_limit: 6,
+          max_actions: 2,
+          recency_hours: 72,
+          reply_prompt_stack_key: "reply",
+          use_llm: true,
+          repeat_window_days: 7,
+          bandwidth_mode: "eco",
+        },
+      },
+      {
+        key: "competitor_repost",
+        label: "X：竞争对手改写发布（competitor_repost，PromptStack + LLM 可选）",
+        platform_key: "x",
+        config: {
+          type: "competitor_repost",
+          competitor_handles: ["username1", "username2"],
+          max_candidates: 30,
+          scroll_limit: 8,
+          max_actions: 1,
+          recency_hours: 168,
+          prompt_stack_key: "competitor_repost",
+          use_llm: true,
+          repeat_window_days: 14,
+          bandwidth_mode: "balanced",
+        },
+      },
+      {
+        key: "x_community_like",
+        label: "X：社区时间线→点赞",
+        platform_key: "x",
+        config: {
+          type: "x_community_like",
+          community_id: "1234567890123456789",
+          max_candidates: 30,
+          scroll_limit: 8,
+          max_actions: 3,
+          recency_hours: 72,
+          bandwidth_mode: "eco",
+        },
+      },
     ],
     []
   );
@@ -258,14 +333,33 @@ export default function StrategiesPage() {
   function requiredCapabilitiesForType(type: string): string[] {
     const t = type.trim().toLowerCase();
     const caps: string[] = [];
-    if (t.startsWith("x_search_") || t.startsWith("x_verified_") || t === "keyword_repost" || t === "x_keyword_repost") {
+    const isOriginalPosts = t === "original_posts" || t === "original_post" || t === "x_original_post";
+    const isKeywordRewritePublish = t === "keyword_repost" || t === "x_keyword_repost";
+    const isCompetitorRewritePublish =
+      t === "competitor_repost" ||
+      t === "competitor_repost_as_original" ||
+      t === "x_competitor_repost" ||
+      t === "x_competitor_repost_as_original";
+
+    if (t.startsWith("x_search_") || t.startsWith("x_verified_") || isKeywordRewritePublish) {
       caps.push("SOURCE_KEYWORD_SEARCH");
     }
     if (t.startsWith("x_verified_")) caps.push("TARGET_VERIFIED_ONLY");
-    if (t.includes("publish_post") || t === "reddit_post") caps.push("PUBLISH_POST");
+    if (t.startsWith("x_profile_") || t.startsWith("x_competitor_") || isCompetitorRewritePublish) caps.push("SOURCE_PROFILE");
+    if (t.startsWith("x_community_")) caps.push("SOURCE_COMMUNITY");
+    if (t.startsWith("x_feed_")) caps.push("SOURCE_FEED");
+
+    if (
+      t.includes("publish_post") ||
+      t === "reddit_post" ||
+      isOriginalPosts ||
+      isKeywordRewritePublish ||
+      isCompetitorRewritePublish
+    )
+      caps.push("PUBLISH_POST");
     if (t.includes("like") || t.includes("upvote")) caps.push("ENGAGE_LIKE");
     if (t.includes("reply") || t.includes("comment")) caps.push("ENGAGE_COMMENT");
-    if (t.includes("repost") || t.includes("retweet")) caps.push("ENGAGE_REPOST");
+    if (!isKeywordRewritePublish && !isCompetitorRewritePublish && (t.includes("repost") || t.includes("retweet"))) caps.push("ENGAGE_REPOST");
     if (t.includes("quote")) caps.push("ENGAGE_QUOTE");
     return Array.from(new Set(caps));
   }

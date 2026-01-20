@@ -27,3 +27,8 @@ class UpdateStrategyRequest(BaseModel):
     name: str | None = Field(default=None, max_length=200)
     config: dict | None = None
 
+
+class StrategyValidateResponse(BaseModel):
+    ok: bool
+    errors: list[str] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)

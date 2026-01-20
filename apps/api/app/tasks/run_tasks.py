@@ -110,7 +110,9 @@ def execute_account_run(account_run_id: str) -> None:
         if _strategy_requires_action_text(strategy_type) and not _resolve_action_text(db, workspace_id=account_run.workspace_id, strategy=strategy):
             _fail_account_run(db, account_run, run, error_code="STRATEGY_CONFIG_INVALID")
             return
-        if _resolve_action_type(strategy_type) == "x_publish_post" and not _strategy_has_publish_content(strategy):
+        if _resolve_action_type(strategy_type) == "x_publish_post" and not _strategy_has_publish_content(
+            db, workspace_id=account_run.workspace_id, strategy=strategy
+        ):
             _fail_account_run(db, account_run, run, error_code="STRATEGY_CONFIG_INVALID")
             return
 
@@ -119,7 +121,68 @@ def execute_account_run(account_run_id: str) -> None:
             if not _resolve_search_query(config):
                 _fail_account_run(db, account_run, run, error_code="STRATEGY_CONFIG_INVALID")
                 return
-            search_specs = _build_search_collect_specs(db, strategy, account_run=account_run, account=account, run=run)
+            search_specs = _build_collect_specs(db, strategy, account_run=account_run, account=account, run=run)
+            executed_actions, results, error_code = _execute_specs(
+                db,
+                account_run=account_run,
+                run=run,
+                account=account,
+                strategy=strategy,
+                storage_state=storage_state,
+                specs=search_specs,
+            )
+            if error_code is not None:
+                if not _retry_or_fail_account_run(db, account_run, run, error_code=error_code):
+                    _fail_account_run(db, account_run, run, error_code=error_code)
+                return
+
+            candidates = _extract_candidates(executed_actions, results)
+            if not candidates:
+                account_run.status = "succeeded"
+                account_run.finished_at = utc_now()
+                account_run.next_retry_at = None
+                db.add(account_run)
+                db.commit()
+                _finalize_run_if_done(db, run.id)
+                return
+
+            action_specs = _build_keyword_repost_specs(
+                db,
+                strategy,
+                account_run=account_run,
+                account=account,
+                run=run,
+                candidates=candidates,
+            )
+            if not action_specs:
+                _fail_account_run(db, account_run, run, error_code="CONTENT_GENERATION_FAILED")
+                return
+            _, _, action_error = _execute_specs(
+                db,
+                account_run=account_run,
+                run=run,
+                account=account,
+                strategy=strategy,
+                storage_state=storage_state,
+                specs=action_specs,
+            )
+            if action_error is not None:
+                if not _retry_or_fail_account_run(db, account_run, run, error_code=action_error):
+                    _fail_account_run(db, account_run, run, error_code=action_error)
+                return
+
+        elif strategy_type in {
+            "competitor_repost",
+            "competitor_repost_as_original",
+            "x_competitor_repost",
+            "x_competitor_repost_as_original",
+        }:
+            config = strategy.config if isinstance(strategy.config, dict) else {}
+            if not _resolve_x_profile_target_url(config):
+                _fail_account_run(db, account_run, run, error_code="STRATEGY_CONFIG_INVALID")
+                return
+
+            search_specs = _build_collect_specs(db, strategy, account_run=account_run, account=account, run=run)
             executed_actions, results, error_code = _execute_specs(
                 db,
                 account_run=account_run,
@@ -178,12 +241,36 @@ def execute_account_run(account_run_id: str) -> None:
             "x_verified_repost",
             "x_verified_reply",
             "x_verified_quote",
+            "x_profile_like",
+            "x_profile_repost",
+            "x_profile_reply",
+            "x_profile_quote",
+            "x_competitor_like",
+            "x_competitor_repost",
+            "x_competitor_reply",
+            "x_competitor_quote",
+            "x_community_like",
+            "x_community_repost",
+            "x_community_reply",
+            "x_community_quote",
+            "x_feed_like",
+            "x_feed_repost",
+            "x_feed_reply",
+            "x_feed_quote",
             "keyword_like",
             "keyword_reply",
             "keyword_quote",
             "keyword_retweet",
         }:
-            search_specs = _build_search_collect_specs(db, strategy, account_run=account_run, account=account, run=run)
+            config = strategy.config if isinstance(strategy.config, dict) else {}
+            if strategy_type.startswith(("x_profile_", "x_competitor_")) and not _resolve_x_profile_target_url(config):
+                _fail_account_run(db, account_run, run, error_code="STRATEGY_CONFIG_INVALID")
+                return
+            if strategy_type.startswith("x_community_") and not _resolve_x_community_target_url(config):
+                _fail_account_run(db, account_run, run, error_code="STRATEGY_CONFIG_INVALID")
+                return
+
+            search_specs = _build_collect_specs(db, strategy, account_run=account_run, account=account, run=run)
             executed_actions, results, error_code = _execute_specs(
                 db,
                 account_run=account_run,
@@ -378,6 +465,10 @@ def _build_action_specs(db, strategy: Strategy, *, account_run: AccountRun, acco
     if action_type == "x_publish_post":
         texts = _resolve_publish_texts(strategy)
         media_urls = _resolve_media_urls(config)
+        if not texts:
+            generated = _resolve_action_text(db, workspace_id=account_run.workspace_id, strategy=strategy, allow_llm=True)
+            if generated:
+                texts = [generated]
         if not texts and not media_urls:
             return specs
 
@@ -488,6 +579,237 @@ def _build_action_specs(db, strategy: Strategy, *, account_run: AccountRun, acco
         )
 
     return specs
+
+
+def _build_collect_specs(
+    db, strategy: Strategy, *, account_run: AccountRun, account: SocialAccount, run: Run
+) -> list[dict]:
+    kind = _strategy_type(strategy)
+    if kind in {"keyword_repost", "x_keyword_repost"} or kind.startswith(("x_search_", "x_verified_", "keyword_")):
+        return _build_search_collect_specs(db, strategy, account_run=account_run, account=account, run=run)
+
+    if kind in {
+        "competitor_repost",
+        "competitor_repost_as_original",
+        "x_competitor_repost",
+        "x_competitor_repost_as_original",
+    } or kind.startswith(("x_profile_", "x_competitor_")):
+        return _build_profile_collect_specs(db, strategy, account_run=account_run, account=account, run=run)
+
+    if kind.startswith("x_community_"):
+        return _build_community_collect_specs(db, strategy, account_run=account_run, account=account, run=run)
+
+    if kind.startswith("x_feed_"):
+        return _build_feed_collect_specs(db, strategy, account_run=account_run, account=account, run=run)
+
+    return _build_search_collect_specs(db, strategy, account_run=account_run, account=account, run=run)
+
+
+def _build_profile_collect_specs(
+    db, strategy: Strategy, *, account_run: AccountRun, account: SocialAccount, run: Run
+) -> list[dict]:
+    config = strategy.config if isinstance(strategy.config, dict) else {}
+    bandwidth_mode = config.get("bandwidth_mode")
+    specs = _build_action_specs(db, strategy, account_run=account_run, account=account)
+
+    target_url = _resolve_x_profile_target_url(config)
+    if not target_url:
+        specs.append(
+            {
+                "action_type": "x_search_collect",
+                "platform_key": "x",
+                "target_url": None,
+                "target_external_id": None,
+                "idempotency_key": f"{account_run.workspace_id}:{account.id}:x_search_collect:{run.id}",
+                "bandwidth_mode": bandwidth_mode,
+                "action_params": {"max_candidates": 0, "scroll_limit": 0},
+            }
+        )
+        return specs
+
+    max_candidates = _get_int_from_config(config, "max_candidates", default=20, min_value=1, max_value=200)
+    scroll_limit = _get_int_from_config(config, "scroll_limit", default=6, min_value=0, max_value=50)
+    verified_only_dom = bool(config.get("verified_only") is True)
+
+    specs.append(
+        {
+            "action_type": "x_search_collect",
+            "platform_key": "x",
+            "target_url": target_url,
+            "target_external_id": None,
+            "idempotency_key": f"{account_run.workspace_id}:{account.id}:x_search_collect:{run.id}",
+            "bandwidth_mode": bandwidth_mode,
+            "action_params": {
+                "max_candidates": max_candidates,
+                "scroll_limit": scroll_limit,
+                "verified_only_dom": verified_only_dom,
+            },
+            "metadata": {"source": "profile"},
+        }
+    )
+    return specs
+
+
+def _build_community_collect_specs(
+    db, strategy: Strategy, *, account_run: AccountRun, account: SocialAccount, run: Run
+) -> list[dict]:
+    config = strategy.config if isinstance(strategy.config, dict) else {}
+    bandwidth_mode = config.get("bandwidth_mode")
+    specs = _build_action_specs(db, strategy, account_run=account_run, account=account)
+
+    target_url = _resolve_x_community_target_url(config)
+    if not target_url:
+        specs.append(
+            {
+                "action_type": "x_search_collect",
+                "platform_key": "x",
+                "target_url": None,
+                "target_external_id": None,
+                "idempotency_key": f"{account_run.workspace_id}:{account.id}:x_search_collect:{run.id}",
+                "bandwidth_mode": bandwidth_mode,
+                "action_params": {"max_candidates": 0, "scroll_limit": 0},
+            }
+        )
+        return specs
+
+    max_candidates = _get_int_from_config(config, "max_candidates", default=20, min_value=1, max_value=200)
+    scroll_limit = _get_int_from_config(config, "scroll_limit", default=6, min_value=0, max_value=50)
+    verified_only_dom = bool(config.get("verified_only") is True)
+
+    specs.append(
+        {
+            "action_type": "x_search_collect",
+            "platform_key": "x",
+            "target_url": target_url,
+            "target_external_id": None,
+            "idempotency_key": f"{account_run.workspace_id}:{account.id}:x_search_collect:{run.id}",
+            "bandwidth_mode": bandwidth_mode,
+            "action_params": {
+                "max_candidates": max_candidates,
+                "scroll_limit": scroll_limit,
+                "verified_only_dom": verified_only_dom,
+            },
+            "metadata": {"source": "community"},
+        }
+    )
+    return specs
+
+
+def _build_feed_collect_specs(db, strategy: Strategy, *, account_run: AccountRun, account: SocialAccount, run: Run) -> list[dict]:
+    config = strategy.config if isinstance(strategy.config, dict) else {}
+    bandwidth_mode = config.get("bandwidth_mode")
+    specs = _build_action_specs(db, strategy, account_run=account_run, account=account)
+
+    max_candidates = _get_int_from_config(config, "max_candidates", default=20, min_value=1, max_value=200)
+    scroll_limit = _get_int_from_config(config, "scroll_limit", default=6, min_value=0, max_value=50)
+    verified_only_dom = bool(config.get("verified_only") is True)
+
+    specs.append(
+        {
+            "action_type": "x_search_collect",
+            "platform_key": "x",
+            "target_url": "https://x.com/home",
+            "target_external_id": None,
+            "idempotency_key": f"{account_run.workspace_id}:{account.id}:x_search_collect:{run.id}",
+            "bandwidth_mode": bandwidth_mode,
+            "action_params": {
+                "max_candidates": max_candidates,
+                "scroll_limit": scroll_limit,
+                "verified_only_dom": verified_only_dom,
+            },
+            "metadata": {"source": "feed"},
+        }
+    )
+    return specs
+
+
+def _resolve_x_profile_target_url(config: dict) -> str | None:
+    candidates: list[str] = []
+    for key in [
+        "profile_url",
+        "profile",
+        "handle",
+        "handles",
+        "profile_urls",
+        "profile_handles",
+        "competitor_profiles",
+        "competitor_handles",
+    ]:
+        raw = config.get(key)
+        if isinstance(raw, str) and raw.strip():
+            candidates.append(raw.strip())
+        elif isinstance(raw, list):
+            candidates.extend([str(item).strip() for item in raw if str(item).strip()])
+
+    handles: list[str] = []
+    for item in candidates:
+        handle = _extract_x_handle(item)
+        if handle:
+            handles.append(handle)
+
+    if not handles:
+        return None
+    picked = random.choice(handles)
+    return f"https://x.com/{picked}"
+
+
+def _resolve_x_community_target_url(config: dict) -> str | None:
+    raw_candidates: list[str] = []
+    for key in ["community_id", "community_ids", "community_url", "community_urls", "communities"]:
+        raw = config.get(key)
+        if isinstance(raw, str) and raw.strip():
+            raw_candidates.append(raw.strip())
+        elif isinstance(raw, list):
+            raw_candidates.extend([str(item).strip() for item in raw if str(item).strip()])
+
+    if not raw_candidates:
+        return None
+    picked = random.choice(raw_candidates)
+    if picked.isdigit():
+        return f"https://x.com/i/communities/{picked}"
+
+    try:
+        parsed = urllib.parse.urlparse(picked)
+        if parsed.scheme and parsed.netloc:
+            return picked
+    except Exception:
+        pass
+
+    m = re.search(r"/communities/(?P<cid>\d+)", picked)
+    if m:
+        return f"https://x.com/i/communities/{m.group('cid')}"
+    return None
+
+
+def _extract_x_handle(value: str) -> str | None:
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    if raw.startswith("@"):
+        raw = raw[1:].strip()
+    raw = raw.strip().strip("/")
+    if not raw:
+        return None
+
+    if "://" in raw:
+        try:
+            parsed = urllib.parse.urlparse(raw)
+            path = (parsed.path or "").strip("/")
+            if not path:
+                return None
+            seg = path.split("/", 1)[0].strip()
+            if not seg or seg.lower() in {"home", "search", "i", "explore", "notifications", "messages"}:
+                return None
+            return seg
+        except Exception:
+            return None
+
+    seg = raw.split("/", 1)[0].strip()
+    if not seg:
+        return None
+    if seg.lower() in {"home", "search", "i", "explore", "notifications", "messages"}:
+        return None
+    return seg
 
 
 def _execute_specs(
@@ -786,6 +1108,8 @@ def _resolve_action_type(action_kind: str) -> str | None:
         return "x_quote"
     if kind in {"x_publish_post", "x_publish", "publish_post", "publish"}:
         return "x_publish_post"
+    if kind in {"original_posts", "original_post", "x_original_post"}:
+        return "x_publish_post"
     if kind in {"x_keyword_repost", "keyword_repost"}:
         return "x_keyword_repost"
     if kind in {"reddit_upvote"}:
@@ -802,11 +1126,13 @@ def _strategy_requires_action_text(strategy_type: str) -> bool:
     return kind.endswith("reply") or kind.endswith("comment") or kind.endswith("quote")
 
 
-def _strategy_has_publish_content(strategy: Strategy) -> bool:
+def _strategy_has_publish_content(db, *, workspace_id: uuid.UUID, strategy: Strategy) -> bool:
     config = strategy.config if isinstance(strategy.config, dict) else {}
     if _resolve_media_urls(config):
         return True
-    return bool(_resolve_publish_texts(strategy))
+    if _resolve_publish_texts(strategy):
+        return True
+    return bool(_resolve_action_text(db, workspace_id=workspace_id, strategy=strategy, allow_llm=False))
 
 
 def _resolve_action_text(
@@ -876,8 +1202,10 @@ def _resolve_action_text(
                 return None
             payload = row.payload if isinstance(row.payload, dict) else {}
             generated = generate_prompt_from_stack(payload)
-            if generated.strip():
-                return generated.strip()
+            cleaned = generated.strip()
+            cleaned = _enforce_text_limits(cleaned, kind=kind, config=config)
+            if cleaned:
+                return cleaned
             return None
 
     if kind.endswith("quote") or kind in {"x_quote", "quote"}:
@@ -893,14 +1221,18 @@ def _resolve_action_text(
     for key in string_keys:
         raw = config.get(key)
         if isinstance(raw, str) and raw.strip():
-            return raw.strip()
+            cleaned = raw.strip()
+            cleaned = _enforce_text_limits(cleaned, kind=kind, config=config)
+            return cleaned or None
 
     for key in list_keys:
         raw_list = config.get(key)
         if isinstance(raw_list, list):
             cleaned = [str(item).strip() for item in raw_list if str(item).strip()]
             if cleaned:
-                return random.choice(cleaned)
+                picked = random.choice(cleaned)
+                picked = _enforce_text_limits(picked, kind=kind, config=config)
+                return picked or None
 
     return None
 
@@ -953,7 +1285,7 @@ def _enforce_text_limits(text: str, *, kind: str, config: dict) -> str:
         except Exception:
             max_chars = None
     elif kind.startswith("x_"):
-        max_chars = 240
+        max_chars = 280
 
     if max_chars is not None and max_chars > 0 and len(cleaned) > max_chars:
         cleaned = cleaned[:max_chars].rstrip()

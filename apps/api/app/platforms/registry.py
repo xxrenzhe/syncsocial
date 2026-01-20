@@ -18,6 +18,9 @@ _platform_meta: dict[str, dict] = {
             "ENGAGE_QUOTE",
             "TARGET_VERIFIED_ONLY",
             "SOURCE_KEYWORD_SEARCH",
+            "SOURCE_FEED",
+            "SOURCE_PROFILE",
+            "SOURCE_COMMUNITY",
         ],
     },
     "reddit": {
